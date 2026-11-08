@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "description": "Coopanion World for short coding-agent completion notifications",
   "license": "AGPL-3.0-or-later",
@@ -16,7 +16,6 @@
     "displayName": "Coding Agent Notify",
     "tags": [
       "apps",
-      "external-setup",
       "experimental"
     ],
     "locales": {

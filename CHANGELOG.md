@@ -2,6 +2,11 @@
 
 # Changelog
 
+## 0.1.3 — 2026-11-08
+
+- 移除 `external-setup`（需额外安装）标签：不依赖其他 World 插件，Agent hook 由本插件配置页按需配置；既有 Agent 与 Node.js 运行要求仍见 README。
+- Remove the `external-setup` tag; native agent hooks are configured from this World without other World plugins. Existing agent and Node.js requirements remain documented in the README.
+
 ## 0.1.2 — 2026-11-08
 
 - 修复 OpenCode 多项目重复通知：全局完成事件缺少 location 时，仍按会话实际所属目录过滤，仅由对应项目实例转发。

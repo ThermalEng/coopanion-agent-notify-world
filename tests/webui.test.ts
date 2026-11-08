@@ -31,4 +31,3 @@ it('exposes exactly two buttons per agent and keeps Test disabled until installe
   life.abort();
   root.remove();
 });
-

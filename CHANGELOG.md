@@ -2,6 +2,15 @@
 
 # Changelog
 
+## 0.1.1
+
+- 修复桌面环境 `spawn codex ENOENT`：四个 Agent 的接入无需手动指定命令路径，CLI 由用户 shell / PowerShell 自动查找；需要外部 Node.js 的 hook 和所有测试按钮使用自动找到的 Node.js 绝对路径。无新增依赖。
+- Resolve CLIs through the user shell or PowerShell and use the discovered absolute Node.js path for command hooks and delivery tests; no manual executable-path settings or new dependencies.
+- 纠正隐私说明并移除误声明的 `sensitive-data` 标签：只转交任务结论及定位信息，不采集截图、麦克风或窗口数据；市场历史警示标签另行申请撤销。
+- Correct the data disclosure and remove the mistakenly declared `sensitive-data` tag. Only final reports and workspace/session metadata are forwarded; no screen, microphone or foreground-window capture. Existing market warnings require a separate withdrawal request.
+- 本次按用户要求未运行测试或类型检查，Windows 兼容性仍待验证。
+- Tests and type checks were not run for this release, as requested; Windows compatibility remains unverified.
+
 ## 0.1.0
 
 - 为 Codex、Claude Code、OpenCode、DSH 提供独立的安装 hook 和测试按钮；启动 World 不安装 hook。

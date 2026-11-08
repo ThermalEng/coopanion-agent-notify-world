@@ -3,7 +3,7 @@ import { execFile, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -37,6 +37,13 @@ function powershellArgs(command: string, args: string[], forwardInput = false) {
     'exit $LASTEXITCODE',
   ].join('; ');
   return ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+}
+
+// Let the OS shell resolve CLI paths, including those added by shell startup files.
+function nativeCommand(command: string, args: string[], env: NodeJS.ProcessEnv, timeout = 120_000) {
+  return exec(WINDOWS ? 'powershell.exe' : env.SHELL || userInfo().shell || '/bin/sh',
+    WINDOWS ? powershellArgs(command, args) : ['-ilc', `exec ${[command, ...args].map(shellQuote).join(' ')}`],
+    { timeout, windowsHide: true, env: { ...process.env, ...env } });
 }
 
 async function exists(file: string) {
@@ -109,11 +116,16 @@ export class HookManager {
       dsh: join(this.dir, 'dsh-plugin'),
     };
     this.dshManifest = join(this.env.DSH_HOME || join(home, '.dsh'), 'profiles', this.profile, 'package.json');
-    this.run = options.run ?? (async (command, args) => {
-      await exec(WINDOWS ? 'powershell.exe' : command, WINDOWS ? powershellArgs(command, args) : args, {
-        timeout: 120_000, windowsHide: true, env: { ...process.env, ...this.env },
-      });
-    });
+    this.run = options.run ?? (async (command, args) => { await nativeCommand(command, args, this.env); });
+  }
+
+  private async nodePath() {
+    const marker = '__COOPANION_NODE__';
+    // Base64 keeps non-ASCII Windows paths intact across PowerShell output encodings.
+    const { stdout } = await nativeCommand(NODE, ['-p', `${JSON.stringify(marker)} + Buffer.from(process.execPath).toString('base64')`], this.env, 10_000);
+    const line = stdout.split(/\r?\n/).reverse().find((value) => value.startsWith(marker));
+    if (!line) throw new Error('Cannot locate Node.js. Install Node.js 22+ before installing or testing hooks.');
+    return Buffer.from(line.slice(marker.length), 'base64').toString('utf8');
   }
 
   async status(agent: Agent): Promise<HookStatus> {
@@ -142,13 +154,14 @@ export class HookManager {
       const path = this.paths[agent];
       const settings = await readJson(path);
       const entries = stopHooks(settings);
-      const hook: CommandHook = { type: 'command', command: `node ${shellQuote(this.runner)} ${agent}`, async: true };
+      const node = await this.nodePath();
+      const hook: CommandHook = { type: 'command', command: `${shellQuote(node)} ${shellQuote(this.runner)} ${agent}`, async: true };
       if (WINDOWS) {
         if (agent === 'claude') {
-          hook.command = NODE;
+          hook.command = node;
           hook.args = [this.runner, agent];
         } else {
-          hook.commandWindows = `powershell.exe ${powershellArgs(NODE, [this.runner, agent], true).join(' ')}`;
+          hook.commandWindows = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
         }
       }
       const existing = managedHook(entries);
@@ -169,15 +182,16 @@ export class HookManager {
         dsh: { bundle: { patch: './cordis.patch.yml' } },
       }, null, 2));
       await writeAtomic(join(dir, 'cordis.patch.yml'), `- insert:\n    - id: ${DSH_NAME}\n      name: ${DSH_NAME}\n`);
-      await this.run(this.env.COOPANION_DSH_BIN || 'dsh', ['plugin', '--profile', this.profile, 'add', `link:${dir}`]);
+      await this.run('dsh', ['plugin', '--profile', this.profile, 'add', `link:${dir}`]);
     }
     if (!(await this.status(agent)).installed) throw new Error(`${LABELS[agent]} hook was not registered`);
   }
 
   async test(agent: Agent) {
     if (!(await this.status(agent)).installed) throw new Error(`Install the ${LABELS[agent]} hook first.`);
+    const node = await this.nodePath();
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(NODE, [this.runner, agent], {
+      const child = spawn(node, [this.runner, agent], {
         env: { ...process.env, ...this.env }, stdio: ['pipe', 'ignore', 'pipe'], timeout: 5000, windowsHide: true,
       });
       let error = '';

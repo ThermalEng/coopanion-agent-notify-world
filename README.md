@@ -19,22 +19,24 @@ ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩�
 
 Codex、Claude hook 与配置页的测试需要 `node`（22+）在 PATH 中；Codex、DSH 的安装分别需要 `codex`、`dsh` 在 PATH 中。OpenCode、DSH 插件直接使用自身运行时发送报告。生成的 Agent 插件只是本扩展的入口，不会安装第三方插件。
 
-World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报告发来，由 Coopanion 当前连接的模型总结，再使用其内置桌宠能力通知。因此需要 Coopanion 正在运行并已连接模型，模型调用会产生正常用量。**最终报告会进入 Coopanion 的模型上下文和事件历史**，不会发送完整对话。
+World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报告发来，由 Coopanion 当前连接的模型总结，再使用其内置桌宠能力通知。因此需要 Coopanion 正在运行并已连接模型，模型调用会产生正常用量。**任务结论会进入 Coopanion 当前配置的模型上下文和事件历史**。通知只转交最终回复／任务结论及项目路径、会话标识，不转交完整对话，不采集屏幕截图、麦克风音频或前台窗口信息。结论本身仍可能包含项目信息，请按所用模型服务的数据政策使用。
 
 「测试」验证共用发送器 → World 事件入口，收到后由 Coo 通知；它不替代一次真实 Agent 任务对原生回调的验证。不提供离线队列；Coopanion 关闭时通知跳过，不影响 Agent 完成任务。重新点击安装不会重复添加 hook。
 
-默认生成目录：`~/.coopanion/agent-hooks`。可通过 `COOPANION_AGENT_HOOK_HOME` 更改；DSH 支持 `COOPANION_DSH_PROFILE`、`COOPANION_DSH_BIN`、`DSH_HOME`。也尊重 Agent 自带的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。使用多个配置时，应让 Coopanion 启动环境与对应 Agent 一致。
+默认生成目录：`~/.coopanion/agent-hooks`。可通过 `COOPANION_AGENT_HOOK_HOME` 更改；DSH 支持 `COOPANION_DSH_PROFILE`、`DSH_HOME`。也尊重 Agent 自带的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。使用多个配置时，应让 Coopanion 启动环境与对应 Agent 一致。
 
 Codex 的 TOML 配置由自身 CLI 修改。已有 JSON 设置保留其他键；无效 JSON 会报错，不会覆盖。
+
+四个 Agent 均不需要手动填写可执行文件路径。需要调用 CLI 时，Linux/macOS 使用用户的交互式登录 shell 查找命令，Windows 使用 PowerShell `Get-Command` 查找，兼容 npm 的 `.cmd` 入口。Codex、DSH 的安装通过各自 CLI 完成；Claude Code、OpenCode 直接使用原生配置或插件目录，不额外启动其 CLI。需要外部 Node.js 的 hook 与四个 Agent 的「测试」按钮共用自动查找，并使用找到的 Node.js 绝对路径，避免桌面进程 PATH 不完整导致 `ENOENT`；OpenCode、DSH 的正常回调继续使用自身运行时。未安装所需程序时会报错，不自动安装程序。
 
 ## Windows
 
 面向 Windows 原生运行的 Agent；WSL 中的 Agent 按 Linux 环境部署，不混用两侧的 hook 路径。默认 hook 目录为 `%USERPROFILE%\.coopanion\agent-hooks`，Agent 配置路径仍尊重上述环境变量。
 
 - 安装 Codex、DSH hook 时，通过 Windows PowerShell 调用原生 CLI，兼容 npm 的 `.cmd` 入口和带空格、中文的路径。
-- Claude Code 使用原生 `command` + `args` 形式直接启动 `node.exe`；需使用支持该形式的版本。
+- Claude Code 使用原生 `command` + `args` 形式直接启动自动找到的 `node.exe`；需使用支持该形式的版本。
 - Codex 使用 `commandWindows`，通过编码后的 PowerShell 命令转交 UTF-8 报告；需使用支持该字段的版本。
-- OpenCode、DSH 仍直接导入共用发送模块；配置页的测试直接启动 `node.exe`，不弹出额外控制台窗口。
+- OpenCode、DSH 仍直接导入共用发送模块；配置页的测试直接启动自动找到的 `node.exe`，不弹出额外控制台窗口。
 
 Windows 需要 PATH 中有 Node.js 22+ 和对应 Agent CLI，以及系统自带的 `powershell.exe`。本次 Windows 适配未运行测试。
 

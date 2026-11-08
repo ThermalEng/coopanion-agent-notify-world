@@ -14,7 +14,7 @@ ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩�
 | --- | --- |
 | Codex | 用户目录 `hooks.json` 的 `Stop`，用 `codex features enable hooks` 开启功能 |
 | Claude Code | 用户目录 `settings.json` 的 `Stop` |
-| OpenCode | 用户 `plugins/` 目录中的本地插件，监听 `session.idle` |
+| OpenCode | 用户 `plugins/` 目录中的本地插件；V2 监听 `session.execution.succeeded`，V1 ≥ 1.18.29 使用 `session.idle` |
 | DSH | `dsh plugin --profile web add link:…` 安装本地 Cordis 插件，监听 `session/event` 和 `agent/turn-stopping` |
 
 Codex、Claude hook 与配置页的测试需要 `node`（22+）在 PATH 中；Codex、DSH 的安装分别需要 `codex`、`dsh` 在 PATH 中。OpenCode、DSH 插件直接使用自身运行时发送报告。生成的 Agent 插件只是本扩展的入口，不会安装第三方插件。
@@ -27,7 +27,7 @@ World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报�
 
 Codex 的 TOML 配置由自身 CLI 修改。已有 JSON 设置保留其他键；无效 JSON 会报错，不会覆盖。
 
-四个 Agent 均不需要手动填写可执行文件路径。需要调用 CLI 时，Linux/macOS 使用用户的交互式登录 shell 查找命令，Windows 使用 PowerShell `Get-Command` 查找，兼容 npm 的 `.cmd` 入口。Codex、DSH 的安装通过各自 CLI 完成；Claude Code、OpenCode 直接使用原生配置或插件目录，不额外启动其 CLI。需要外部 Node.js 的 hook 与四个 Agent 的「测试」按钮共用自动查找，并使用找到的 Node.js 绝对路径，避免桌面进程 PATH 不完整导致 `ENOENT`；OpenCode、DSH 的正常回调继续使用自身运行时。未安装所需程序时会报错，不自动安装程序。
+四个 Agent 均不需要手动填写可执行文件路径。需要调用 CLI 时，Linux/macOS 使用用户的交互式登录 shell 查找命令，Windows 使用 PowerShell `Get-Command` 查找，兼容 npm 的 `.cmd` 入口。Codex、DSH 的安装通过各自 CLI 完成；Claude Code、OpenCode 直接使用原生配置或插件目录，不额外启动其 CLI。需要外部 Node.js 的 hook 与四个 Agent 的「测试」按钮共用自动查找，并使用找到的 Node.js 绝对路径，避免桌面进程 PATH 不完整导致 `ENOENT`；查找时排除 Coopanion 自带的 Electron Node 包装脚本，只接受独立 Node.js 22+，测试也不继承 Electron 的 Node 模式；OpenCode、DSH 的正常回调继续使用自身运行时。未安装所需程序时会报错，不自动安装程序。
 
 ## Windows
 

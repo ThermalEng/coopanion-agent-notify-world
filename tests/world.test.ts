@@ -83,7 +83,7 @@ describe('agent hook installation', () => {
     }
     if (agent === 'codex') expect(f.run).toHaveBeenCalledWith('codex', ['features', 'enable', 'hooks']);
     if (agent === 'dsh') expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'web', 'add', `link:${path}`]);
-    if (agent === 'opencode') expect(await readFile(path, 'utf8')).toContain('export { OpenCode as CoopanionNotify }');
+    if (agent === 'opencode') expect(await readFile(path, 'utf8')).toContain('export { OpenCodePlugin as default }');
   });
 
   it('preserves unrelated settings and refuses invalid JSON', async () => {
@@ -117,7 +117,7 @@ describe('report delivery', () => {
     await f.invoke('test', agent);
     expect(f.pushEvent).toHaveBeenCalledOnce();
     expect(f.pushEvent).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'coding-agent.completed', text: expect.stringContaining('Test: yes'),
+      type: 'coding-agent.completed', text: expect.stringContaining('通知测试消息，请用 pet_say 简短通知用户已收到。'),
       meta: expect.objectContaining({ agent, test: true }),
     }), { trigger: 'flush' });
   });
@@ -162,12 +162,50 @@ describe('report delivery', () => {
         get: async ({path}) => { return {data:{parentID:path.id==='child'?'root':undefined}}; },
         messages: async () => ({data:[{info:{role:'assistant'},parts:[{type:'reasoning',text:'private'},{type:'text',text:'Final result'}]}]})
       }}};
-      const hooks = await plugin.CoopanionNotify(ctx);
+      const hooks = await plugin.default.server(ctx);
       assert.equal(hooks.event({event:{type:'session.idle',properties:{sessionID:'s1'}}}), undefined);
       hooks.event({event:{type:'session.idle',properties:{sessionID:'child'}}});
     `);
     await vi.waitFor(() => expect(f.pushEvent).toHaveBeenCalledOnce());
     expect(f.pushEvent.mock.calls[0]?.[0]).toMatchObject({ text: expect.stringContaining('Final result') });
+    expect(JSON.stringify(f.pushEvent.mock.calls)).not.toContain('private');
+  });
+
+  it('OpenCode V2 scopes global completion events to its project and cleans up subscriptions', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'opencode');
+    await probe((await f.hooks.status('opencode')).detail, `
+      let signal;
+      const ctx = {
+        location: {directory:'/test/project'},
+        event: {async *subscribe(options) {
+          assert.deepEqual(options.types, ['session.execution.succeeded']);
+          signal = options.signal;
+          yield {type:'session.execution.succeeded',data:{sessionID:'s1'}};
+          yield {type:'session.execution.succeeded',data:{sessionID:'foreign'}};
+          yield {type:'session.execution.succeeded',data:{sessionID:'child'},location:{directory:'/test/project'}};
+          yield {type:'session.execution.succeeded',data:{sessionID:'other'},location:{directory:'/other'}};
+        }},
+        session: {
+          get: async ({sessionID}) => {
+            assert.notEqual(sessionID, 'other');
+            return {parentID:sessionID==='child'?'root':undefined,
+              location:{directory:sessionID==='foreign'?'/other':'/test/project'}};
+          },
+          context: async ({sessionID}) => {
+            assert.equal(sessionID, 's1');
+            return [{type:'assistant',content:[{type:'reasoning',text:'private'},{type:'text',text:'V2 final result'}]}];
+          }
+        }
+      };
+      assert.equal(plugin.default.id, 'coding-agent-notify');
+      const cleanup = plugin.default.setup(ctx);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      cleanup();
+      assert.equal(signal.aborted, true);
+    `);
+    await vi.waitFor(() => expect(f.pushEvent).toHaveBeenCalledOnce());
+    expect(f.pushEvent.mock.calls[0]?.[0]).toMatchObject({ text: expect.stringContaining('V2 final result') });
     expect(JSON.stringify(f.pushEvent.mock.calls)).not.toContain('private');
   });
 

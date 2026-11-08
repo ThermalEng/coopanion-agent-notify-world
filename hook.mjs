@@ -48,6 +48,35 @@ export async function OpenCode({ client, directory }) {
   };
 }
 
+// Plain definitions are the native Plugin.define result; no SDK dependency needed.
+export const OpenCodePlugin = {
+  id: 'coding-agent-notify',
+  server: OpenCode,
+  setup(ctx) {
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ types: ['session.execution.succeeded'], signal: controller.signal })) {
+        if (event.location && (event.location.directory !== ctx.location.directory
+          || event.location.workspaceID !== ctx.location.workspaceID)) continue;
+        try {
+          const id = event.data.sessionID;
+          const session = await ctx.session.get({ sessionID: id });
+          // Completion events can omit location on the server-wide bus.
+          if (session.parentID || session.location.directory !== ctx.location.directory) continue;
+          const messages = await ctx.session.context({ sessionID: id });
+          const last = messages.findLast((item) => item.type === 'assistant');
+          await send('opencode', {
+            summary: textOf(last?.content), session_id: id, cwd: session.location.directory,
+          });
+        } catch (error) { console.warn('[coding-agent-notify]', error.message); }
+      }
+    })().catch((error) => {
+      if (!controller.signal.aborted) console.warn('[coding-agent-notify]', error.message);
+    });
+    return () => controller.abort();
+  },
+};
+
 export const name = 'coopanion-agent-notify-dsh';
 export const inject = [];
 export function apply(ctx) {

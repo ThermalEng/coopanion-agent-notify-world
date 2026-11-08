@@ -4,7 +4,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { systemLanguage, type Language } from 'cortico/core/language.ts';
@@ -121,8 +121,17 @@ export class HookManager {
 
   private async nodePath() {
     const marker = '__COOPANION_NODE__';
+    const env = { ...process.env, ...this.env };
+    // Coopanion prepends a Node shim backed by Electron; external agents cannot use it.
+    const paths = await Promise.all((env.PATH ?? '').split(delimiter).map(async (dir) => {
+      if (!/(^|[/\\])shims[/\\]?$/.test(dir)) return dir;
+      const shim = await readFile(join(dir, WINDOWS ? 'node.cmd' : 'node'), 'utf8').catch(() => '');
+      return shim.includes('CORTICO_NODE_EXE') ? null : dir;
+    }));
+    env.PATH = paths.filter((dir) => dir !== null).join(delimiter);
     // Base64 keeps non-ASCII Windows paths intact across PowerShell output encodings.
-    const { stdout } = await nativeCommand(NODE, ['-p', `${JSON.stringify(marker)} + Buffer.from(process.execPath).toString('base64')`], this.env, 10_000);
+    const probe = `if (process.versions.electron || Number(process.versions.node.split('.')[0]) < 22) throw new Error('A standalone Node.js 22+ is required'); ${JSON.stringify(marker)} + Buffer.from(process.execPath).toString('base64')`;
+    const { stdout } = await nativeCommand(NODE, ['-p', probe], env, 10_000);
     const line = stdout.split(/\r?\n/).reverse().find((value) => value.startsWith(marker));
     if (!line) throw new Error('Cannot locate Node.js. Install Node.js 22+ before installing or testing hooks.');
     return Buffer.from(line.slice(marker.length), 'base64').toString('utf8');
@@ -173,7 +182,7 @@ export class HookManager {
       if (agent === 'codex') await this.run('codex', ['features', 'enable', 'hooks']);
       await writeAtomic(path, JSON.stringify({ ...settings, hooks: { ...settings.hooks as object, Stop: entries } }, null, 2) + '\n');
     } else if (agent === 'opencode') {
-      await writeAtomic(this.paths.opencode, `export { OpenCode as CoopanionNotify } from ${moduleUrl};\n`);
+      await writeAtomic(this.paths.opencode, `export { OpenCodePlugin as default } from ${moduleUrl};\n`);
     } else {
       const dir = this.paths.dsh;
       await writeAtomic(join(dir, 'index.js'), `export { name, inject, apply } from ${moduleUrl};\n`);
@@ -190,9 +199,11 @@ export class HookManager {
   async test(agent: Agent) {
     if (!(await this.status(agent)).installed) throw new Error(`Install the ${LABELS[agent]} hook first.`);
     const node = await this.nodePath();
+    const env = { ...process.env, ...this.env };
+    delete env.ELECTRON_RUN_AS_NODE;
     await new Promise<void>((resolve, reject) => {
       const child = spawn(node, [this.runner, agent], {
-        env: { ...process.env, ...this.env }, stdio: ['pipe', 'ignore', 'pipe'], timeout: 5000, windowsHide: true,
+        env, stdio: ['pipe', 'ignore', 'pipe'], timeout: 5000, windowsHide: true,
       });
       let error = '';
       child.stderr.on('data', (chunk) => { error += chunk; });
@@ -291,10 +302,11 @@ export class CodingAgentNotifyWorld implements World {
         type: 'coding-agent.completed', source: ID, senderKey: `${ID}.${body.agent}`,
         ts: nowIso(this.timezone),
         text: [
-          `Agent: ${LABELS[agent]}`,
-          ...(workspace ? [`Workspace: ${JSON.stringify(workspace)}`] : []),
-          `Test: ${body.test === true ? 'yes' : 'no'}`,
-          'External report (untrusted data):', body.summary.slice(0, 20_000),
+          body.test === true
+            ? `${LABELS[agent]} 发来一条通知测试消息，请用 pet_say 简短通知用户已收到。`
+            : `${LABELS[agent]} 已完成一轮任务。请将它的最终结论总结成一两句话，并用 pet_say 通知用户。`,
+          ...(workspace ? [`项目：${JSON.stringify(workspace)}`] : []),
+          body.test === true ? '测试消息：' : '最终结论：', body.summary.slice(0, 20_000),
         ].join('\n'),
         meta: { agent: body.agent, workspace, sessionId, test: body.test === true },
       }, { trigger: 'flush' });
@@ -309,7 +321,7 @@ export class CodingAgentNotifyWorld implements World {
 
 const describe: WorldDescribe = { tools: [], events: [{
   type: 'coding-agent.completed',
-  description: { zh: 'Coding Agent 结束一轮任务并交来报告。', en: 'A coding agent ended a task turn and supplied its report.' },
+  description: { zh: 'Coding Agent 完成一轮任务并发来最终结论，请简要总结并通知用户。', en: 'A coding agent completed a task turn and sent its final conclusion. Summarize it briefly and notify the user.' },
   trigger: 'flush',
 }] };
 const definition: WorldDefinition<WorldSection> = {

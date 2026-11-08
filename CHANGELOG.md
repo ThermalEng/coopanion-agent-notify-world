@@ -2,6 +2,23 @@
 
 # Changelog
 
+## 0.1.2 — 2026-11-08
+
+- 修复 OpenCode 多项目重复通知：全局完成事件缺少 location 时，仍按会话实际所属目录过滤，仅由对应项目实例转发。
+- Filter OpenCode global completion events by the session’s own directory to prevent cross-project duplicate notifications.
+
+- 修复 Codex / Claude hook 误用 Coopanion Electron 程序：查找 Node.js 时排除应用自带包装脚本并校验独立 Node.js 22+；测试移除 Electron Node 模式环境，避免“测试能发、真实 hook 不运行”。
+- Exclude Coopanion’s Electron-backed Node shim from runtime discovery, require standalone Node.js 22+, and remove Electron Node mode from delivery tests.
+
+- 修复 OpenCode 2.x 插件加载失败：默认导出 `id` / `setup` 定义，订阅原生 `session.execution.succeeded` 完成事件（不再等待旧的 `session.idle`），通过会话上下文读取结论，卸载时取消订阅；保留 V1 ≥ 1.18.29 的 `server` 接口，无新增依赖。
+- Fix OpenCode V2 loading and completion delivery using a default plugin definition, the native `session.execution.succeeded` event and session context; retain the V1 ≥ 1.18.29 server entrypoint without adding dependencies.
+
+- 通知文案直接说明 Agent 已完成一轮任务、提交的是最终结论，请总结后用 `pet_say` 通知用户；测试消息单独说明，替换 `Agent / Test / Report` 标签。
+- State which agent completed a task turn, label its final conclusion, and request a brief `pet_say` notification; identify delivery tests separately instead of using terse report tags.
+
+- 用户已实测确认通知正常；本次未重新运行自动化测试或类型检查，Windows 兼容性仍待验证。
+- Notification delivery was verified by the user; automated tests and type checks were not rerun for this release. Windows compatibility remains unverified.
+
 ## 0.1.1
 
 - 修复桌面环境 `spawn codex ENOENT`：四个 Agent 的接入无需手动指定命令路径，CLI 由用户 shell / PowerShell 自动查找；需要外部 Node.js 的 hook 和所有测试按钮使用自动找到的 Node.js 绝对路径。无新增依赖。

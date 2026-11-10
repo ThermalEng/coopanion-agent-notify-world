@@ -1,11 +1,12 @@
 import type { Language } from 'cortico/core/language.ts';
 import type { WebUiClientBundle, WebUiPanel } from 'cortico/web/shared/client-panel.ts';
 
-export type Agent = 'codex' | 'claude' | 'opencode' | 'dsh';
-export const AGENTS: Agent[] = ['codex', 'claude', 'opencode', 'dsh'];
-export const LABELS: Record<Agent, string> = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness' };
+export type Agent = 'codex' | 'claude' | 'opencode' | 'dsh' | 'muse' | 'agy';
+export const AGENTS: Agent[] = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy'];
+export const LABELS: Record<Agent, string> = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)' };
 export interface HookStatus { id: Agent; installed: boolean; detail: string }
-export interface PanelState { online: boolean; agents: HookStatus[] }
+export interface TestResult { coverage: 'full' | 'notification-only' }
+export interface PanelState { online: boolean; agents: HookStatus[]; testResult?: TestResult }
 
 // Text shared with the World declaration; importing this module does not mount the panel.
 const COPY: Record<Language, readonly [string, string, string, string, string, string, string, string]> = {
@@ -23,7 +24,15 @@ const COPY: Record<Language, readonly [string, string, string, string, string, s
 };
 export function uiText(language: Language) {
   const [title, install, test, installed, missing, online, offline, done] = COPY[language];
-  return { title, install, test, installed, missing, online, offline, done };
+  const zh = language === 'zh' || language === 'zh-Hant';
+  return { title, install, test, installed, missing, online, offline, done,
+    testHint: zh ? '测试会调用 Agent CLI 和已配置的模型，可能产生费用，最多等待约两分钟；请确认桌宠播报。部分 Agent（如 Codex）安装或更新 hook 后，需要重新打开 Agent 并授权 hook，再进行测试。'
+      : 'Tests invoke the agent CLI and its configured model, may incur usage costs, and take up to about two minutes. Confirm the pet notification. Some agents (such as Codex) require reopening the agent and authorizing the hook after installation or updates, before testing.',
+    full: zh ? 'CLI → 原生 hook → Coopanion 回报已收到，请确认桌宠播报。'
+      : 'CLI → native hook → Coopanion report received. Confirm the pet notification.',
+    partial: (agent: Agent) => zh ? `PATH 未检测到 ${agent} 命令，本次仅测试通知发送，请手动测试 Agent 完成通知。`
+      : `Command ${agent} was not found on PATH. Only notification delivery was tested; manually test agent completion notifications.`,
+  };
 }
 
 const panel: WebUiPanel = {
@@ -32,9 +41,9 @@ const panel: WebUiPanel = {
     const t = uiText(ctx.language);
     const sheet = ui.sheet({ title: t.title });
     const endpoint = ui.pill(t.offline, 'off');
-    sheet.body.append(endpoint);
+    sheet.body.append(endpoint, ui.h('p', '', t.testHint));
     ctx.root.append(sheet.el);
-    const rows = new Map<Agent, { state: HTMLSpanElement; install: HTMLButtonElement; test: HTMLButtonElement }>();
+    const rows = new Map<Agent, { state: HTMLSpanElement; install: HTMLButtonElement; test: HTMLButtonElement; result: HTMLElement }>();
     const pending = new Set<Agent>();
     let current: PanelState = { online: false, agents: [] };
 
@@ -48,9 +57,11 @@ const panel: WebUiPanel = {
       const test = ui.button(t.test, { size: 'sm' });
       // Prevent a click before the initial state request completes.
       install.disabled = test.disabled = true;
-      row.append(label, state, install, test);
+      const result = ui.h('small');
+      result.style.cssText = 'flex-basis:100%;white-space:pre-wrap';
+      row.append(label, state, install, test, result);
       sheet.body.append(row);
-      rows.set(agent, { state, install, test });
+      rows.set(agent, { state, install, test, result });
       install.addEventListener('click', () => void act(agent, 'install'), { signal: ctx.signal });
       test.addEventListener('click', () => void act(agent, 'test'), { signal: ctx.signal });
     }
@@ -61,7 +72,8 @@ const panel: WebUiPanel = {
       endpoint.textContent = value.online ? t.online : t.offline;
       endpoint.className = `pill ${value.online ? 'on' : 'off'}`;
       for (const status of value.agents) {
-        const row = rows.get(status.id)!;
+        const row = rows.get(status.id);
+        if (!row) continue;
         row.state.textContent = status.installed ? t.installed : t.missing;
         row.state.className = `pill ${status.installed ? 'on' : 'off'}`;
         row.state.title = status.detail;
@@ -73,12 +85,24 @@ const panel: WebUiPanel = {
     async function act(agent: Agent, method: 'install' | 'test') {
       if (pending.has(agent)) return;
       pending.add(agent);
+      if (method === 'test') rows.get(agent)!.result.textContent = '';
       render(current);
       try {
-        render(await ctx.invoke<PanelState>(method, [agent]));
-        if (!ctx.signal.aborted) ui.toast(`${LABELS[agent]} · ${t.done}`, 'ok');
+        const value = await ctx.invoke<PanelState>(method, [agent]);
+        render(value);
+        if (!ctx.signal.aborted) {
+          const message = value.testResult
+            ? value.testResult.coverage === 'full' ? t.full : t.partial(agent)
+            : `${LABELS[agent]} · ${t.done}`;
+          if (method === 'test') rows.get(agent)!.result.textContent = message;
+          ui.toast(message, value.testResult?.coverage === 'notification-only' ? 'bad' : 'ok');
+        }
       } catch (error) {
-        if (!ctx.signal.aborted) ui.toast(error instanceof Error ? error.message : String(error), 'bad');
+        if (!ctx.signal.aborted) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (method === 'test') rows.get(agent)!.result.textContent = message;
+          ui.toast(message, 'bad');
+        }
       } finally {
         pending.delete(agent);
         render(current);

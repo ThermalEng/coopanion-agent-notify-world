@@ -1,11 +1,14 @@
 #!/usr/bin/env node
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 // Shared sender: command hook CLI, OpenCode plugin and DSH plugin.
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const agents = ['codex', 'claude', 'opencode', 'dsh'];
-export const labels = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness' };
+export const agents = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy'];
+export const labels = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)' };
 
 function textOf(content) {
   if (typeof content === 'string') return content;
@@ -112,8 +115,35 @@ async function main() {
   let input;
   try { input = JSON.parse(raw); } catch { return; }
   if (!input || typeof input !== 'object') return;
-  if (['codex', 'claude'].includes(agent) && input.hook_event_name !== 'Stop') return;
-  try { await send(agent, input); }
+  if (['codex', 'claude', 'muse'].includes(agent) && input.hook_event_name !== 'Stop') return;
+  try {
+    if (agent === 'muse' && input.test !== true && process.env.MUSE_THREAD_ID && process.env.MUSE_SESSION_ID
+      && process.env.MUSE_THREAD_ID !== process.env.MUSE_SESSION_ID) return;
+    if (agent === 'agy' && input.test !== true) {
+      // Stop also fires while background work continues or execution fails.
+      // CLI uses NO_TOOL_CALL; the web documentation also describes model_stop.
+      if (input.fullyIdle !== true || !['NO_TOOL_CALL', 'model_stop'].includes(input.terminationReason) || input.error) return;
+      let summary = '';
+      const path = input.transcriptPath?.startsWith('~/')
+        ? resolve(homedir(), input.transcriptPath.slice(2)) : input.transcriptPath;
+      const stream = createReadStream(path, { encoding: 'utf8' });
+      const lines = createInterface({ input: stream, crlfDelay: Infinity });
+      try {
+        for await (const line of lines) {
+          let step;
+          try { step = JSON.parse(line); } catch { continue; }
+          // Do not reuse a previous turn's answer if this turn has none.
+          if (step.type === 'USER_INPUT') summary = '';
+          if (step.source === 'MODEL' && step.type === 'PLANNER_RESPONSE' && step.status === 'DONE') {
+            summary = textOf(step.content).slice(0, 20_000);
+          }
+        }
+      } finally { lines.close(); stream.destroy(); }
+      if (!summary.trim()) return;
+      input = { summary, session_id: input.conversationId, cwd: input.workspacePaths?.[0] };
+    }
+    await send(agent, input);
+  }
   catch (error) {
     if (input.test === true) {
       console.error(error.message);

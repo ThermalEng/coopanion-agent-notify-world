@@ -20,10 +20,11 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "coopanion hooks '空格-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'home');
-  const run = vi.fn(async (command: string, args: string[]) => {
-    if (command === 'dsh') {
-      const file = join(home, '.dsh', 'profiles', 'web', 'package.json');
-      await mkdir(join(home, '.dsh', 'profiles', 'web'), { recursive: true });
+  const run = vi.fn(async (command: string, args: string[], _cwd?: string) => {
+    if (command === 'dsh' && args[0] === 'plugin') {
+      const profile = args[args.indexOf('--profile') + 1];
+      const file = join(home, '.dsh', 'profiles', profile, 'package.json');
+      await mkdir(join(home, '.dsh', 'profiles', profile), { recursive: true });
       await writeFile(file, JSON.stringify({ dsh: { profile: { bundles: ['coopanion-agent-notify-dsh'] } } }));
     }
   });
@@ -76,10 +77,16 @@ describe('agent hook installation', () => {
     const statuses = await f.hooks.statuses();
     expect(statuses.filter((value) => value.installed).map((value) => value.id)).toEqual([agent]);
     const path = statuses.find((value) => value.id === agent)!.detail;
-    if (agent === 'codex' || agent === 'claude') {
+    if (agent === 'codex' || agent === 'claude' || agent === 'muse') {
       const settings = JSON.parse(await readFile(path, 'utf8'));
       expect(settings.hooks.Stop).toHaveLength(1);
-      expect(settings.hooks.Stop[0].hooks[0].async).toBe(true);
+      expect(settings.hooks.Stop[0].hooks[0].async).toBe(agent === 'muse');
+      if (agent !== 'muse') expect(settings.hooks.Stop[0].hooks[0].timeout).toBe(5);
+    }
+    if (agent === 'agy') {
+      const settings = JSON.parse(await readFile(path, 'utf8'));
+      expect(settings['coding-agent-notify'].Stop).toHaveLength(1);
+      expect(settings['coding-agent-notify'].Stop[0].command).toContain(' agy');
     }
     if (agent === 'codex') expect(f.run).toHaveBeenCalledWith('codex', ['features', 'enable', 'hooks']);
     if (agent === 'dsh') expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'web', 'add', `link:${path}`]);
@@ -102,6 +109,19 @@ describe('agent hook installation', () => {
     expect(await readFile(file, 'utf8')).toBe('[]');
   });
 
+  it('preserves other agy definitions when reinstalling its managed hook', async () => {
+    const f = await fixture();
+    const file = join(f.home, '.gemini', 'config', 'hooks.json');
+    await mkdir(join(f.home, '.gemini', 'config'), { recursive: true });
+    const other = { Stop: [{ command: 'echo kept' }] };
+    await writeFile(file, JSON.stringify({ other }));
+    await f.hooks.install('agy');
+    await f.hooks.install('agy');
+    const settings = JSON.parse(await readFile(file, 'utf8'));
+    expect(settings.other).toEqual(other);
+    expect(settings['coding-agent-notify'].Stop).toHaveLength(1);
+  });
+
   it('does not register a Codex hook when its native CLI fails', async () => {
     const f = await fixture();
     f.run.mockRejectedValueOnce(new Error('Native feature unavailable'));
@@ -111,22 +131,140 @@ describe('agent hook installation', () => {
 });
 
 describe('report delivery', () => {
-  it.each(AGENTS)('%s Test travels through the runner to a flush event', async (agent) => {
+  it.each(AGENTS)('%s Test invokes its CLI and requires a matching native report', async (agent) => {
     const f = await mounted();
     await f.invoke('install', agent);
-    await f.invoke('test', agent);
+    f.run.mockImplementation(async (command, args) => {
+      expect(command).toBe(agent);
+      const prompt = args.find((arg) => arg.includes('COOPANION_HOOK_TEST_'))!;
+      expect(prompt).toContain('Do not use tools');
+      const endpoint = JSON.parse(await readFile(join(f.hooks.dir, 'endpoint.json'), 'utf8'));
+      await fetch(endpoint.url, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.token}` },
+        body: JSON.stringify({ agent, summary: prompt.match(/COOPANION_HOOK_TEST_[a-f0-9]+/)![0] }),
+      });
+    });
+    expect((await f.invoke('test', agent)).testResult?.coverage).toBe('full');
     expect(f.pushEvent).toHaveBeenCalledOnce();
     expect(f.pushEvent).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'coding-agent.completed', text: expect.stringContaining('通知测试消息，请用 pet_say 简短通知用户已收到。'),
-      meta: expect.objectContaining({ agent, test: true }),
+      text: expect.stringContaining('原生 hook 回报已到达 Coopanion'),
+      meta: expect.objectContaining({ agent, test: true, testCoverage: 'full' }),
     }), { trigger: 'flush' });
   });
 
-  it('rejects tests before installation or while offline, but normal hooks do not fail the task', async () => {
+  it.skipIf(process.platform === 'win32')('closes CLI stdin without invoking a model', async () => {
     const f = await fixture();
-    await expect(f.hooks.test('claude')).rejects.toThrow('Install');
+    await f.hooks.install('codex');
+    const bin = join(f.root, 'bin');
+    const receipt = join(f.root, 'stdin-closed.json');
+    const shell = join(f.root, 'test-shell');
+    await mkdir(bin);
+    await writeFile(shell, '#!/bin/sh\nexec /bin/sh -c "$2"\n', { mode: 0o700 });
+    await writeFile(join(bin, 'codex'), `#!${process.execPath}
+const fs = require('node:fs');
+process.stdin.resume();
+process.stdin.on('end', () => fs.writeFileSync(process.env.COOPANION_TEST_RECEIPT, JSON.stringify(process.argv.slice(2))));
+`, { mode: 0o700 });
+    const hooks = new HookManager({ homeDir: f.home, hookDir: f.hooks.dir, env: {
+      SHELL: shell, PATH: `${bin}:${process.env.PATH}`, COOPANION_TEST_RECEIPT: receipt,
+    } });
+    expect((await hooks.test('codex', 'EOF_TEST_MARKER')).coverage).toBe('full');
+    const args = JSON.parse(await readFile(receipt, 'utf8')) as string[];
+    expect(args[0]).toBe('exec');
+    expect(args.at(-1)).toContain('EOF_TEST_MARKER');
+  });
+
+  it('keeps the test workspace until a delayed hook report arrives', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'claude');
+    let workspace = '';
+    let delivery: Promise<void> | undefined;
+    f.run.mockImplementation(async (_command, args, cwd) => {
+      workspace = cwd!;
+      const marker = args.find((arg) => arg.includes('COOPANION_HOOK_TEST_'))!.match(/COOPANION_HOOK_TEST_[a-f0-9]+/)![0];
+      delivery = new Promise<void>((resolve) => setTimeout(resolve, 25)).then(async () => {
+        expect((await stat(workspace)).isDirectory()).toBe(true);
+        const endpoint = JSON.parse(await readFile(join(f.hooks.dir, 'endpoint.json'), 'utf8'));
+        await fetch(endpoint.url, { method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.token}` },
+          body: JSON.stringify({ agent: 'claude', summary: marker }),
+        });
+      });
+    });
+    expect((await f.invoke('test', 'claude')).testResult?.coverage).toBe('full');
+    await delivery;
+    await expect(stat(workspace)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('reports missing CLI as notification-only and requests manual testing', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'agy');
+    f.run.mockRejectedValueOnce(Object.assign(new Error('missing CLI'), { stderr: '__COOPANION_COMMAND_NOT_FOUND__' }));
+    expect((await f.invoke('test', 'agy')).testResult?.coverage).toBe('notification-only');
+    expect(f.pushEvent).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('PATH 未检测到 agy 命令'),
+      meta: expect.objectContaining({ test: true, testCoverage: 'notification-only' }),
+    }), { trigger: 'flush' });
+  });
+
+  it('does not treat model or authentication failures as a missing CLI', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'agy');
+    f.run.mockRejectedValueOnce(new Error('Authentication failed'));
+    await expect(f.invoke('test', 'agy')).rejects.toThrow('Authentication failed');
+    expect(f.pushEvent).not.toHaveBeenCalled();
+  });
+
+  it('fails if the CLI exits successfully without a matching native report', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'agy');
+    const pending = f.invoke('test', 'agy');
+    const check = expect(pending).rejects.toThrow('no matching hook report');
+    await vi.waitFor(() => expect(f.run).toHaveBeenCalledWith('agy', expect.arrayContaining(['--print']), expect.any(String)));
+    // Use the real report timeout; the CLI fixture never starts an actual agent.
+    await check;
+  }, 15_000);
+
+  it('forwards the Muse Stop final answer', async () => {
+    const f = await mounted();
+    await f.hooks.install('muse');
+    await runner('node', [f.hooks.runner, 'muse'], {
+      hook_event_name: 'Stop', last_assistant_message: 'Muse final answer', cwd: '/project', session_id: 'muse-1',
+    });
+    expect(f.pushEvent).toHaveBeenCalledOnce();
+    expect(f.pushEvent).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('Muse final answer'), meta: expect.objectContaining({ agent: 'muse' }),
+    }), { trigger: 'flush' });
+  });
+
+  it.each(['NO_TOOL_CALL', 'model_stop'])('forwards only the last agy answer on a successful fully idle Stop (%s)', async (terminationReason) => {
+    const f = await mounted();
+    await f.hooks.install('agy');
+    const transcriptPath = join(f.root, 'transcript.jsonl');
+    await writeFile(transcriptPath, [
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Old answer' },
+      { source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'New task' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'Intermediate answer' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'agy final answer', thinking: 'Private reasoning' },
+    ].map((step) => JSON.stringify(step)).join('\n'));
+    const input = { transcriptPath, conversationId: 'agy-1', workspacePaths: ['/project'], terminationReason, fullyIdle: true };
+    for (const override of [{ fullyIdle: false }, { terminationReason: 'ERROR' }, { terminationReason: 'USER_CANCELED' }, { terminationReason: 'MAX_INVOCATIONS' }, { error: 'failed' }]) {
+      await runner('node', [f.hooks.runner, 'agy'], { ...input, ...override });
+    }
+    expect(f.pushEvent).not.toHaveBeenCalled();
+    await runner('node', [f.hooks.runner, 'agy'], input);
+    expect(f.pushEvent).toHaveBeenCalledOnce();
+    const event = f.pushEvent.mock.calls[0][0] as { text: string; meta: object };
+    expect(event.text).toContain('agy final answer');
+    expect(event.text).not.toContain('Old answer');
+    expect(event.text).not.toContain('Private reasoning');
+    expect(event.meta).toMatchObject({ agent: 'agy', workspace: '/project', sessionId: 'agy-1' });
+  });
+
+  it('rejects tests before installation, but normal hooks do not fail the task', async () => {
+    const f = await fixture();
+    await expect(f.hooks.test('claude', 'TEST_MARKER')).rejects.toThrow('Install');
     await f.hooks.install('claude');
-    await expect(f.hooks.test('claude')).rejects.toThrow();
     expect(await runner('node', [f.hooks.runner, 'claude'], { hook_event_name: 'Stop', last_assistant_message: 'Done' })).toBe(0);
   });
 

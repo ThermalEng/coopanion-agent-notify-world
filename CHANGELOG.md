@@ -2,6 +2,18 @@
 
 # Changelog
 
+## 1.0.0 — 2026-11-10
+
+- OpenCode CLI 最小真实任务已以退出码 0 正常结束，用户已确认收到回复；保留 stdin EOF 与回报等待期间保留工作目录的修复，不额外修改 OpenCode 模型或后台服务。
+- Codex / Claude Stop 改为最多 5 秒的同步发送，避免单次 CLI 结束时异步 hook 尚未完成；测试临时目录改为收到回报或等待结束后清理。CLI 失败显示退出码/超时及 stdout、stderr，避免隐藏 OpenCode 的实际错误。
+- 修复 CLI 测试未关闭标准输入导致 Codex 等待 stdin 并超时；启动后立即发送 EOF，提示词仍仅通过命令行参数传递。
+- 配置页测试改为调用对应 Agent CLI，再等待本轮唯一标识的原生 hook 回报；CLI 成功但没有回报仍报失败。找不到命令时仅测试通知并提示 PATH 未检测到命令、请手动测试。DSH 安装同时注册 headless profile 以支持 CLI 测试。
+- 修复 agy CLI 正常完成的 `NO_TOOL_CALL` 被过滤；同时兼容文档中的 `model_stop`，继续跳过后台未结束、出错或取消。
+- 本地开发版使用独立版本号，避免沿用 0.1.3 的长期前端缓存；配置页忽略不存在的 Agent 行。
+- 增加 Muse Code、agy（Antigravity CLI）的安装 hook / 测试按钮；复用原生 Stop 与共用发送器，无新增生产文件或运行时依赖。
+- agy 只在成功且完全空闲时提取当前轮最终模型正文；重复安装更新本插件具名配置，保留其他 hook。
+- 用户已确认 Codex 重新授权后测试成功；测试页新增安装或更新 hook 后需重新打开 Agent 并授权的提示。已构建并同步本机；本次未运行自动化测试或类型检查，Windows 仍待验证。
+
 ## 0.1.3 — 2026-11-08
 
 - 移除 `external-setup`（需额外安装）标签：不依赖其他 World 插件，Agent hook 由本插件配置页按需配置；既有 Agent 与 Node.js 运行要求仍见 README。

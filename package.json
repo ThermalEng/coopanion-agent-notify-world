@@ -15,8 +15,7 @@
     "describe": "describe.json",
     "displayName": "Coding Agent Notify",
     "tags": [
-      "apps",
-      "experimental"
+      "apps"
     ],
     "locales": {
       "zh": {

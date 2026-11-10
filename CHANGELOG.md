@@ -4,6 +4,8 @@
 
 ## 1.0.0 — 2026-11-10
 
+- 移除 `experimental`（实验型）标签，保留 `apps`。
+
 - OpenCode CLI 最小真实任务已以退出码 0 正常结束，用户已确认收到回复；保留 stdin EOF 与回报等待期间保留工作目录的修复，不额外修改 OpenCode 模型或后台服务。
 - Codex / Claude Stop 改为最多 5 秒的同步发送，避免单次 CLI 结束时异步 hook 尚未完成；测试临时目录改为收到回报或等待结束后清理。CLI 失败显示退出码/超时及 stdout、stderr，避免隐藏 OpenCode 的实际错误。
 - 修复 CLI 测试未关闭标准输入导致 Codex 等待 stdin 并超时；启动后立即发送 EOF，提示词仍仅通过命令行参数传递。

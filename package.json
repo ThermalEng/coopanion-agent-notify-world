@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "type": "module",
   "description": "Coopanion World for short coding-agent completion notifications",
   "license": "AGPL-3.0-or-later",
@@ -31,6 +31,9 @@
   },
   "files": [
     "index.ts",
+    "hook-runtime.ts",
+    "coopanion-agent-launch.sh",
+    "coopanion-agent-launch.ps1",
     "webui.ts",
     "hook.mjs",
     "icon.svg",

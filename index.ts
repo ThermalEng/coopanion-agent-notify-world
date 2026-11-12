@@ -12,6 +12,7 @@ import type { World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import type { WorldDefinition, WorldDescribe, WorldSection } from 'cortico/world.ts';
 import { AGENTS, LABELS, uiText, type Agent, type HookStatus, type TestResult } from './webui.ts';
+import { LAUNCHERS, runtimeCommand, runtimeInvocation } from './hook-runtime.ts';
 
 const ID = 'coding-agent-notify';
 const RUNNER = 'coopanion-agent-hook.mjs';
@@ -96,21 +97,16 @@ function stopHooks(settings: Record<string, unknown>): HookEntry[] {
   if (entries.some((entry) => !entry || !Array.isArray(entry.hooks))) throw new Error('Invalid Stop hook entry');
   return entries;
 }
+function hookTexts(hook: CommandHook | undefined): string[] {
+  if (!hook) return [];
+  const commands = [hook.command, hook.commandWindows, hook.args?.join(' ')].filter((value): value is string => Boolean(value));
+  return commands.flatMap((command) => {
+    const encoded = command.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
+    return encoded ? [command, Buffer.from(encoded[1], 'base64').toString('utf16le')] : [command];
+  });
+}
 function hookMatchesRunner(hook: CommandHook | undefined): boolean {
-  if (!hook) return false;
-  if (hook.command?.includes(RUNNER) || hook.commandWindows?.includes(RUNNER)) return true;
-  if (hook.args?.some((arg) => arg.includes(RUNNER))) return true;
-  for (const cmd of [hook.command, hook.commandWindows]) {
-    if (!cmd || !cmd.includes('-EncodedCommand')) continue;
-    const match = cmd.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
-    if (match) {
-      try {
-        const decoded = Buffer.from(match[1], 'base64').toString('utf16le');
-        if (decoded.includes(RUNNER)) return true;
-      } catch {}
-    }
-  }
-  return false;
+  return hookTexts(hook).some((text) => text.includes(RUNNER));
 }
 
 function managedHook(entries: HookEntry[]) {
@@ -166,6 +162,11 @@ export class HookManager {
     return env;
   }
 
+  private hint: Promise<string> | undefined;
+  private runtimeHint() {
+    return this.hint ??= this.nodePath().catch(() => '');
+  }
+
   private async nodePath() {
     const marker = '__COOPANION_NODE__';
     const env = await this.runtimeEnv();
@@ -173,8 +174,14 @@ export class HookManager {
     const probe = `if (process.versions.electron || Number(process.versions.node.split('.')[0]) < 22) throw new Error('A standalone Node.js 22+ is required'); ${JSON.stringify(marker)} + Buffer.from(process.execPath).toString('base64')`;
     const { stdout } = await nativeCommand(NODE, ['-p', probe], env, 10_000);
     const line = stdout.split(/\r?\n/).reverse().find((value) => value.startsWith(marker));
-    if (!line) throw new Error('Cannot locate Node.js. Install Node.js 22+ before installing or testing hooks.');
+    if (!line) throw new Error('No standalone Node.js 22+ found in the installation environment.');
     return Buffer.from(line.slice(marker.length), 'base64').toString('utf8');
+  }
+
+  private async hasHookAssets(hook: CommandHook | undefined) {
+    if (!hook) return false;
+    const usesLauncher = hookTexts(hook).some((text) => LAUNCHERS.some((name) => text.includes(name)));
+    return !usesLauncher || (await Promise.all(LAUNCHERS.map((name) => exists(join(this.dir, name))))).every(Boolean);
   }
 
   async status(agent: Agent): Promise<HookStatus> {
@@ -182,10 +189,10 @@ export class HookManager {
     if (await exists(this.runner)) {
       try {
         if (agent === 'codex' || agent === 'claude' || agent === 'muse' || agent === 'workbuddy') {
-          installed = Boolean(managedHook(stopHooks(await readJson(this.paths[agent]))));
+          installed = await this.hasHookAssets(managedHook(stopHooks(await readJson(this.paths[agent]))));
         } else if (agent === 'agy') {
           const entry = (await readJson(this.paths.agy))[ID] as { enabled?: boolean; Stop?: CommandHook[] } | undefined;
-          installed = entry?.enabled !== false && Boolean(entry?.Stop?.some(hookMatchesRunner));
+          installed = entry?.enabled !== false && await this.hasHookAssets(entry?.Stop?.find(hookMatchesRunner));
         } else if (agent === 'opencode') {
           installed = await exists(this.paths.opencode);
         } else {
@@ -201,21 +208,23 @@ export class HookManager {
 
   async install(agent: Agent) {
     await writeAtomic(this.runner, await readFile(new URL('./hook.mjs', import.meta.url), 'utf8'));
+    for (const name of LAUNCHERS) await writeAtomic(join(this.dir, name), await readFile(new URL(`./${name}`, import.meta.url), 'utf8'));
     const moduleUrl = JSON.stringify(pathToFileURL(this.runner).href);
     if (agent === 'codex' || agent === 'claude' || agent === 'muse' || agent === 'workbuddy') {
       const path = this.paths[agent];
       const settings = await readJson(path);
       const entries = stopHooks(settings);
-      const node = await this.nodePath();
-      const hook: CommandHook = { type: 'command', command: `${shellQuote(node)} ${shellQuote(this.runner)} ${agent}`, async: agent === 'muse', ...(agent !== 'muse' ? { timeout: 5 } : {}) };
+      const hint = await this.runtimeHint();
+      const hook: CommandHook = { type: 'command', command: runtimeCommand(this.runner, agent, hint, false), async: agent === 'muse', ...(agent !== 'muse' ? { timeout: 5 } : {}) };
       if (WINDOWS) {
+        const invocation = runtimeInvocation(this.runner, agent, hint);
         if (agent === 'claude') {
-          hook.command = node;
-          hook.args = [this.runner, agent];
+          hook.command = invocation.command;
+          hook.args = invocation.args;
         } else if (agent === 'workbuddy') {
-          hook.command = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
+          hook.command = runtimeCommand(this.runner, agent, hint);
         } else {
-          hook.commandWindows = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
+          hook.commandWindows = runtimeCommand(this.runner, agent, hint);
         }
       }
       const existing = managedHook(entries);
@@ -228,10 +237,7 @@ export class HookManager {
       await writeAtomic(path, JSON.stringify({ ...settings, hooks: { ...settings.hooks as object, Stop: entries } }, null, 2) + '\n');
     } else if (agent === 'agy') {
       const settings = await readJson(this.paths.agy);
-      const node = await this.nodePath();
-      const command = WINDOWS
-        ? `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`
-        : `${shellQuote(node)} ${shellQuote(this.runner)} ${agent}`;
+      const command = runtimeCommand(this.runner, agent, await this.runtimeHint());
       // agy uses named definitions with a flat Stop handler array. Replace only ours.
       await writeAtomic(this.paths.agy, JSON.stringify({
         ...settings, [ID]: { Stop: [{ type: 'command', command, timeout: 5 }] },
@@ -279,11 +285,11 @@ export class HookManager {
   }
 
   private async notifyTest(agent: Agent, marker: string) {
-    const node = await this.nodePath();
+    const invocation = runtimeInvocation(this.runner, agent, await this.runtimeHint());
     const env = { ...process.env, ...this.env };
     delete env.ELECTRON_RUN_AS_NODE;
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(node, [this.runner, agent], {
+      const child = spawn(invocation.command, invocation.args, {
         env, stdio: ['pipe', 'ignore', 'pipe'], timeout: 5000, windowsHide: true,
       });
       let error = '';

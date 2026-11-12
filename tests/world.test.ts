@@ -91,7 +91,7 @@ describe('agent hook installation', () => {
       const encoded = command.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
       const script = encoded ? Buffer.from(encoded[1], 'base64').toString('utf16le') : command;
       expect(script).toContain('coopanion-agent-hook.mjs');
-      expect(script).toContain(encoded ? "'agy'" : ' agy');
+      expect(script).toContain("'agy'");
     }
     if (agent === 'codex') expect(f.run).toHaveBeenCalledWith('codex', ['features', 'enable', 'hooks']);
     if (agent === 'dsh') expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'web', 'add', `link:${path}`]);
@@ -285,12 +285,20 @@ process.stdin.on('end', () => fs.writeFileSync(process.env.COOPANION_TEST_RECEIP
     expect(await runner('node', [f.hooks.runner, 'claude'], { hook_event_name: 'Stop', last_assistant_message: 'Done' })).toBe(0);
   });
 
-  it('runs the actual configured command safely with spaces and quotes in the path', async () => {
+  it.each(['codex', 'claude', 'muse', 'agy', 'workbuddy'] as const)('runs the configured %s command safely with spaces and quotes in the path', async (agent) => {
     const f = await mounted();
-    await f.invoke('install', 'claude');
-    const value = JSON.parse(await readFile(join(f.home, '.claude', 'settings.json'), 'utf8'));
-    const hook = value.hooks.Stop[0].hooks[0];
-    expect(await runner(hook.command, hook.args ?? [], { hook_event_name: 'Stop', last_assistant_message: '修复完成 ✅', cwd: '/test/workspace' }, !hook.args)).toBe(0);
+    await f.invoke('install', agent);
+    const detail = (await f.hooks.status(agent)).detail;
+    const value = JSON.parse(await readFile(detail, 'utf8'));
+    const hook = agent === 'agy' ? value['coding-agent-notify'].Stop[0] : value.hooks.Stop[0].hooks[0];
+    let input: object = { hook_event_name: 'Stop', last_assistant_message: '修复完成 ✅', cwd: '/test/workspace' };
+    if (agent === 'agy') {
+      const transcriptPath = join(f.root, 'quoted-path-transcript.jsonl');
+      await writeFile(transcriptPath, JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: '修复完成 ✅' }) + '\n');
+      input = { transcriptPath, terminationReason: 'NO_TOOL_CALL', fullyIdle: true, workspacePaths: ['/test/workspace'] };
+    }
+    const command = process.platform === 'win32' ? hook.commandWindows ?? hook.command : hook.command;
+    expect(await runner(command, hook.args ?? [], input, !hook.args)).toBe(0);
     expect(f.pushEvent.mock.calls[0]?.[0]).toMatchObject({ text: expect.stringContaining('修复完成 ✅') });
   });
 
@@ -412,4 +420,26 @@ it('uses distinct settings titles and renders the configured notification prompt
   expect(result.contexts).toEqual([{ id: world.id, envPrompt: override, sourceKey: doc.key }]);
   await rm(join(overrideDir, 'ENV_PROMPT.md'));
   expect((await renderWorldEnvPrompt(world, { deploymentDir })).text).toBe(original);
+});
+
+describe('managed hook upgrades', () => {
+  it('replaces an old absolute Node command while preserving unrelated hooks and settings', async () => {
+    const f = await fixture();
+    const path = join(f.home, '.claude', 'settings.json');
+    await mkdir(join(f.home, '.claude'), { recursive: true });
+    const other = { hooks: [{ type: 'command', command: 'echo unrelated' }] };
+    await writeFile(path, JSON.stringify({ theme: 'kept', hooks: { Stop: [other, { hooks: [{
+      type: 'command', command: `/missing-host-node ${f.hooks.runner} claude`, args: ['obsolete'], commandWindows: 'obsolete',
+    }] }], SessionStart: [other] } }));
+    await f.hooks.install('claude');
+    await f.hooks.install('claude');
+    const settings = JSON.parse(await readFile(path, 'utf8'));
+    expect(settings.theme).toBe('kept');
+    expect(settings.hooks.SessionStart).toEqual([other]);
+    expect(settings.hooks.Stop).toHaveLength(2);
+    expect(settings.hooks.Stop[0]).toEqual(other);
+    expect(JSON.stringify(settings.hooks.Stop[1])).not.toContain('missing-host-node');
+    expect(JSON.stringify(settings.hooks.Stop[1])).not.toContain('obsolete');
+    expect((await f.hooks.status('claude')).installed).toBe(true);
+  });
 });

@@ -1,6 +1,12 @@
-<!-- Owner: package.json, index.ts, webui.ts, hook.mjs -->
+<!-- Owner: package.json, index.ts, webui.ts, hook.mjs, hook-runtime.ts, coopanion-agent-launch.sh, coopanion-agent-launch.ps1 -->
 
 # Changelog
+
+## 1.2.0 — 2026-11-12
+
+- 五种命令型 Agent 共用运行时发现器：优先使用执行环境提供的独立 Node，结合随包运行时、PATH、版本管理器和可选安装提示；OpenCode、DSH 正常回调保留自身运行时。
+- 安装时缺少宿主 Node 不再阻止注册；运行时跳过失效提示、旧版本和 Coopanion Electron 包装器，限制探测耗时并保留 UTF-8 stdin。
+- 保留各 Agent 的 Windows 原生配置格式；重装只升级受管 hook，不改其他 hook 和设置。新增多 Agent 实际命令、无系统 Node、探测挂起、路径转义和升级回归测试。Windows 尚未实机验证。
 
 ## 1.1.1 — 2026-11-12
 

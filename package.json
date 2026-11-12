@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "type": "module",
   "description": "Coopanion World for short coding-agent completion notifications",
   "license": "AGPL-3.0-or-later",
@@ -11,6 +11,7 @@
   "cortico": {
     "kind": "world",
     "api": 6,
+    "icon": "icon.svg",
     "webUiClient": "dist/webui.js",
     "describe": "describe.json",
     "displayName": "Coding Agent Notify",
@@ -20,11 +21,11 @@
     "locales": {
       "zh": {
         "displayName": "Coding Agent 任务通知",
-        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy hook，由 Coopanion 简要播报任务报告。Windows 适配待验证。"
+        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy hook，由 Coopanion 简要播报任务报告。Windows 适配待验证。"
       },
       "en": {
         "displayName": "Coding Agent Notify",
-        "description": "Install native Codex, Claude Code, OpenCode, DSH, Muse Code and agy hooks from the World panel. Coopanion summarizes completion reports. Windows compatibility is unverified."
+        "description": "Install native Codex, Claude Code, OpenCode, DSH, Muse Code, agy and WorkBuddy hooks from the World panel. Coopanion summarizes completion reports. Windows compatibility is unverified."
       }
     }
   },
@@ -32,6 +33,7 @@
     "index.ts",
     "webui.ts",
     "hook.mjs",
+    "icon.svg",
     "ENV_PROMPT.md",
     "dist",
     "describe.json",
@@ -78,7 +80,8 @@
     "opencode",
     "dsh",
     "muse-code",
-    "agy"
+    "agy",
+    "workbuddy"
   ],
   "publishConfig": {
     "access": "public",

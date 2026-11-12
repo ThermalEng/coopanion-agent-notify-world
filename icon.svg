@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Terminal &amp; Chime">
+  <title>方案 A：终端视窗与通知徽章</title>
+  <rect width="256" height="256" rx="56" fill="#F4F5F4"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 终端视窗外框 -->
+    <rect x="36" y="72" width="160" height="130" rx="26" stroke="#1B1626" stroke-width="22"/>
+    <!-- 终端顶部控制圆点 -->
+    <circle cx="64" cy="98" r="5.5" fill="#1B1626"/>
+    <circle cx="82" cy="98" r="5.5" fill="#1B1626"/>
+    <!-- 代码提示符 > -->
+    <path stroke="#1B1626" stroke-width="20" d="M68 136L94 154L68 172"/>
+    <!-- 翠绿发光光标 _ -->
+    <path stroke="#00A870" stroke-width="20" d="M110 172H138"/>
+    <!-- 铃铛扩散振铃声波 -->
+    <path stroke="#00A870" stroke-width="11" d="M178 48C189 53 198 62 203 73"/>
+    <path stroke="#00A870" stroke-width="11" d="M192 37C207 45 216 57 220 73"/>
+    <!-- 右上角通知圆形徽章 -->
+    <circle cx="168" cy="76" r="26" fill="#00A870" stroke="#F4F5F4" stroke-width="6"/>
+    <!-- 铃铛剪影 -->
+    <path d="M168 62C163 62 159 65.5 159 70.5V77.5L155 81.5H181L177 77.5V70.5C177 65.5 173 62 168 62Z" fill="#F4F5F4"/>
+    <circle cx="168" cy="85.5" r="2.8" fill="#F4F5F4"/>
+  </g>
+</svg>

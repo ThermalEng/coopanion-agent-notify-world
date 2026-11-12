@@ -21,8 +21,12 @@ it('exposes exactly two buttons per agent and keeps Test disabled until installe
     stream: () => ({ dispose() {}, send() {}, open: false }),
   } as unknown as WebUiPanelContext);
   await vi.waitFor(() => expect(root.querySelector('button')?.disabled).toBe(false));
+  expect(root.textContent).toContain('Hook 安装与测试');
+  expect(root.textContent).toContain('尚未列出的 Agent');
+  expect(root.textContent).toContain('作者会尽快处理');
+  expect(root.querySelector('a')?.href).toBe('https://github.com/ThermalEng/coopanion-agent-notify-world');
   const buttons = Array.from(root.querySelectorAll('button'));
-  expect(buttons).toHaveLength(12);
+  expect(buttons).toHaveLength(14);
   expect(buttons.filter((button) => button.textContent === '测试').every((button) => button.disabled)).toBe(true);
   buttons[0].click();
   await vi.waitFor(() => expect(buttons[1].disabled).toBe(false));

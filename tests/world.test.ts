@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorldHost } from 'cortico/core/types.ts';
+import { collectWorldContexts, renderWorldEnvPrompt } from 'cortico/core/prefix.ts';
 import { checkDescribe } from 'cortico/extensions/describe-export.ts';
 import definition, { CodingAgentNotifyWorld, HookManager } from '../index.ts';
 import { AGENTS, type Agent, type PanelState } from '../webui.ts';
@@ -77,7 +78,7 @@ describe('agent hook installation', () => {
     const statuses = await f.hooks.statuses();
     expect(statuses.filter((value) => value.installed).map((value) => value.id)).toEqual([agent]);
     const path = statuses.find((value) => value.id === agent)!.detail;
-    if (agent === 'codex' || agent === 'claude' || agent === 'muse') {
+    if (agent === 'codex' || agent === 'claude' || agent === 'muse' || agent === 'workbuddy') {
       const settings = JSON.parse(await readFile(path, 'utf8'));
       expect(settings.hooks.Stop).toHaveLength(1);
       expect(settings.hooks.Stop[0].hooks[0].async).toBe(agent === 'muse');
@@ -86,7 +87,11 @@ describe('agent hook installation', () => {
     if (agent === 'agy') {
       const settings = JSON.parse(await readFile(path, 'utf8'));
       expect(settings['coding-agent-notify'].Stop).toHaveLength(1);
-      expect(settings['coding-agent-notify'].Stop[0].command).toContain(' agy');
+      const command = settings['coding-agent-notify'].Stop[0].command as string;
+      const encoded = command.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
+      const script = encoded ? Buffer.from(encoded[1], 'base64').toString('utf16le') : command;
+      expect(script).toContain('coopanion-agent-hook.mjs');
+      expect(script).toContain(encoded ? "'agy'" : ' agy');
     }
     if (agent === 'codex') expect(f.run).toHaveBeenCalledWith('codex', ['features', 'enable', 'hooks']);
     if (agent === 'dsh') expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'web', 'add', `link:${path}`]);
@@ -237,6 +242,18 @@ process.stdin.on('end', () => fs.writeFileSync(process.env.COOPANION_TEST_RECEIP
     }), { trigger: 'flush' });
   });
 
+  it('forwards the WorkBuddy Stop final answer', async () => {
+    const f = await mounted();
+    await f.hooks.install('workbuddy');
+    await runner('node', [f.hooks.runner, 'workbuddy'], {
+      hook_event_name: 'Stop', last_assistant_message: 'WorkBuddy final answer', cwd: '/project', session_id: 'wb-1',
+    });
+    expect(f.pushEvent).toHaveBeenCalledOnce();
+    expect(f.pushEvent).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('WorkBuddy final answer'), meta: expect.objectContaining({ agent: 'workbuddy' }),
+    }), { trigger: 'flush' });
+  });
+
   it.each(['NO_TOOL_CALL', 'model_stop'])('forwards only the last agy answer on a successful fully idle Stop (%s)', async (terminationReason) => {
     const f = await mounted();
     await f.hooks.install('agy');
@@ -372,4 +389,27 @@ it('matches Cortico metadata and has no runtime npm dependencies', async () => {
   expect(report.failures).toEqual([]);
   const manifest = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'));
   expect(Object.keys(manifest.dependencies ?? {})).toEqual([]);
+});
+
+it('uses distinct settings titles and renders the configured notification prompt', async () => {
+  const f = await fixture();
+  const world = new CodingAgentNotifyWorld('Asia/Shanghai', f.hooks);
+  const ui = world.webUi('zh');
+  expect(ui.panels?.[0].title).toBe('Hook 安装与测试');
+  const doc = ui.promptDocs![0];
+  expect(doc.title).toBe('通知总结提示词');
+  expect(doc.role).toBe('envPrompt');
+  const original = (await readFile(doc.path, 'utf8')).trim();
+  expect(original).toContain('pet_say');
+  expect(await renderWorldEnvPrompt(world)).toEqual({ text: original, sourceKey: doc.key });
+  const deploymentDir = join(f.root, 'deployment');
+  const overrideDir = join(deploymentDir, 'worlds', world.id);
+  await mkdir(overrideDir, { recursive: true });
+  const override = '请只用一句话总结本轮结论，再调用 pet_say 通知用户。';
+  await writeFile(join(overrideDir, 'ENV_PROMPT.md'), override);
+  const result = await collectWorldContexts([world], { deploymentDir });
+  expect(result.failed).toEqual([]);
+  expect(result.contexts).toEqual([{ id: world.id, envPrompt: override, sourceKey: doc.key }]);
+  await rm(join(overrideDir, 'ENV_PROMPT.md'));
+  expect((await renderWorldEnvPrompt(world, { deploymentDir })).text).toBe(original);
 });

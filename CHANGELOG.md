@@ -2,6 +2,18 @@
 
 # Changelog
 
+## 1.1.1 — 2026-11-12
+
+- 设置页分别命名为“Hook 安装与测试”和“通知总结提示词”，新增未列出 Agent 可到 GitHub 提 PR / Issue 的提示。
+- 修复 agy 安装测试对 Windows 编码 PowerShell 命令的断言，解码后核对调用内容。
+- 验证通知提示词参与框架环境前缀渲染，支持部署覆盖及恢复默认；同步提示词描述元数据。
+
+## 1.1.0 — 2026-11-12
+
+- 增加 WorkBuddy 原生 Hook 扩展支持（Agent 增至 7 个），支持标准 `~/.workbuddy/settings.json` 与 `WORKBUDDY_CONFIG_DIR`。
+- 修复全量 Windows 钩子规则与 PowerShell 编码命令识别（修复 agy 与 Muse 在 Windows 下的命令处理与状态误判）。
+- 集成 World 扩展矢量图标 `icon.svg`（终端视窗与通知徽章），符合 Cortico 设计规范并在 `package.json` 声明。
+
 ## 1.0.0 — 2026-11-10
 
 - 移除 `experimental`（实验型）标签，保留 `apps`。

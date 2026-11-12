@@ -7,8 +7,8 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const agents = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy'];
-export const labels = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)' };
+export const agents = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy', 'workbuddy'];
+export const labels = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)', workbuddy: 'WorkBuddy' };
 
 function textOf(content) {
   if (typeof content === 'string') return content;
@@ -115,7 +115,7 @@ async function main() {
   let input;
   try { input = JSON.parse(raw); } catch { return; }
   if (!input || typeof input !== 'object') return;
-  if (['codex', 'claude', 'muse'].includes(agent) && input.hook_event_name !== 'Stop') return;
+  if (['codex', 'claude', 'muse', 'workbuddy'].includes(agent) && input.hook_event_name !== 'Stop') return;
   try {
     if (agent === 'muse' && input.test !== true && process.env.MUSE_THREAD_ID && process.env.MUSE_SESSION_ID
       && process.env.MUSE_THREAD_ID !== process.env.MUSE_SESSION_ID) return;

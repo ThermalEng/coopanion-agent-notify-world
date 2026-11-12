@@ -1,9 +1,9 @@
 import type { Language } from 'cortico/core/language.ts';
 import type { WebUiClientBundle, WebUiPanel } from 'cortico/web/shared/client-panel.ts';
 
-export type Agent = 'codex' | 'claude' | 'opencode' | 'dsh' | 'muse' | 'agy';
-export const AGENTS: Agent[] = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy'];
-export const LABELS: Record<Agent, string> = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)' };
+export type Agent = 'codex' | 'claude' | 'opencode' | 'dsh' | 'muse' | 'agy' | 'workbuddy';
+export const AGENTS: Agent[] = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy', 'workbuddy'];
+export const LABELS: Record<Agent, string> = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)', workbuddy: 'WorkBuddy' };
 export interface HookStatus { id: Agent; installed: boolean; detail: string }
 export interface TestResult { coverage: 'full' | 'notification-only' }
 export interface PanelState { online: boolean; agents: HookStatus[]; testResult?: TestResult }
@@ -26,6 +26,10 @@ export function uiText(language: Language) {
   const [title, install, test, installed, missing, online, offline, done] = COPY[language];
   const zh = language === 'zh' || language === 'zh-Hant';
   return { title, install, test, installed, missing, online, offline, done,
+    hooksTitle: zh ? 'Hook 安装与测试' : 'Hook installation and testing',
+    promptTitle: zh ? '通知总结提示词' : 'Notification summary prompt',
+    promptDescription: zh ? '指导 Coopanion 总结 Agent 最终结论并通知用户。' : 'Guides Coopanion to summarize agent final reports and notify the user.',
+    supportHint: zh ? '如需支持尚未列出的 Agent，请到 GitHub 提交 PR 或 Issue，作者会尽快处理。' : 'For agents not listed here, submit a PR or issue on GitHub; the author will respond promptly.',
     testHint: zh ? '测试会调用 Agent CLI 和已配置的模型，可能产生费用，最多等待约两分钟；请确认桌宠播报。部分 Agent（如 Codex）安装或更新 hook 后，需要重新打开 Agent 并授权 hook，再进行测试。'
       : 'Tests invoke the agent CLI and its configured model, may incur usage costs, and take up to about two minutes. Confirm the pet notification. Some agents (such as Codex) require reopening the agent and authorizing the hook after installation or updates, before testing.',
     full: zh ? 'CLI → 原生 hook → Coopanion 回报已收到，请确认桌宠播报。'
@@ -39,9 +43,15 @@ const panel: WebUiPanel = {
   mount(ctx) {
     const { ui } = ctx;
     const t = uiText(ctx.language);
-    const sheet = ui.sheet({ title: t.title });
+    const sheet = ui.sheet({ title: t.hooksTitle });
     const endpoint = ui.pill(t.offline, 'off');
-    sheet.body.append(endpoint, ui.h('p', '', t.testHint));
+    const support = ui.h('p', '', t.supportHint);
+    const github = ui.h('a', '', 'GitHub');
+    github.href = 'https://github.com/ThermalEng/coopanion-agent-notify-world';
+    github.target = '_blank';
+    github.rel = 'noopener noreferrer';
+    support.append(' ', github);
+    sheet.body.append(endpoint, ui.h('p', '', t.testHint), support);
     ctx.root.append(sheet.el);
     const rows = new Map<Agent, { state: HTMLSpanElement; install: HTMLButtonElement; test: HTMLButtonElement; result: HTMLElement }>();
     const pending = new Set<Agent>();

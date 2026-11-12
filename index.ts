@@ -147,6 +147,7 @@ export class HookManager {
       dsh: join(this.dir, 'dsh-plugin'),
       muse: join(this.env.XDG_CONFIG_HOME || join(home, '.config'), 'muse', 'settings.json'),
       agy: join(home, '.gemini', 'config', 'hooks.json'),
+      workbuddy: join(this.env.WORKBUDDY_CONFIG_DIR || join(home, '.workbuddy'), 'settings.json'),
     };
     this.dshManifest = join(this.env.DSH_HOME || join(home, '.dsh'), 'profiles', this.profile, 'package.json');
     this.run = options.run ?? (async (command, args, cwd) => { await nativeCommand(command, args, await this.runtimeEnv(), 120_000, cwd); });
@@ -180,7 +181,7 @@ export class HookManager {
     let installed = false;
     if (await exists(this.runner)) {
       try {
-        if (agent === 'codex' || agent === 'claude' || agent === 'muse') {
+        if (agent === 'codex' || agent === 'claude' || agent === 'muse' || agent === 'workbuddy') {
           installed = Boolean(managedHook(stopHooks(await readJson(this.paths[agent]))));
         } else if (agent === 'agy') {
           const entry = (await readJson(this.paths.agy))[ID] as { enabled?: boolean; Stop?: CommandHook[] } | undefined;
@@ -201,7 +202,7 @@ export class HookManager {
   async install(agent: Agent) {
     await writeAtomic(this.runner, await readFile(new URL('./hook.mjs', import.meta.url), 'utf8'));
     const moduleUrl = JSON.stringify(pathToFileURL(this.runner).href);
-    if (agent === 'codex' || agent === 'claude' || agent === 'muse') {
+    if (agent === 'codex' || agent === 'claude' || agent === 'muse' || agent === 'workbuddy') {
       const path = this.paths[agent];
       const settings = await readJson(path);
       const entries = stopHooks(settings);
@@ -211,6 +212,8 @@ export class HookManager {
         if (agent === 'claude') {
           hook.command = node;
           hook.args = [this.runner, agent];
+        } else if (agent === 'workbuddy') {
+          hook.command = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
         } else {
           hook.commandWindows = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
         }
@@ -260,6 +263,7 @@ export class HookManager {
       dsh: ['--profile', 'headless', prompt],
       muse: ['exec', prompt],
       agy: ['--print', prompt],
+      workbuddy: ['--print', prompt],
     };
     try {
       await this.run(agent, args[agent], cwd);
@@ -333,7 +337,7 @@ export class CodingAgentNotifyWorld implements World {
     return {
       label: t.title,
       lamps: [{ label: t.title, state: this.server ? 'online' : 'offline' }],
-      panels: [{ id: 'hooks', title: t.title, getMethods: ['state'] }],
+      panels: [{ id: 'hooks', title: t.hooksTitle, getMethods: ['state'] }],
       invoke: async (panel, method, args) => {
         if (panel !== 'hooks') throw new Error('Unknown panel');
         let testResult: TestResult | undefined;
@@ -347,7 +351,7 @@ export class CodingAgentNotifyWorld implements World {
         return { online: this.server !== null, agents: await this.hooks.statuses(), ...(testResult ? { testResult } : {}) };
       },
       promptDocs: [{
-        key: `worlds.${ID}.envPrompt`, title: t.title, description: t.title, role: 'envPrompt',
+        key: `worlds.${ID}.envPrompt`, title: t.promptTitle, description: t.promptDescription, role: 'envPrompt',
         path: fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url)),
       }],
     };

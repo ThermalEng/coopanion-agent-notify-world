@@ -124,8 +124,9 @@ async function main() {
       // CLI uses NO_TOOL_CALL; the web documentation also describes model_stop.
       if (input.fullyIdle !== true || !['NO_TOOL_CALL', 'model_stop'].includes(input.terminationReason) || input.error) return;
       let summary = '';
-      const path = input.transcriptPath?.startsWith('~/')
-        ? resolve(homedir(), input.transcriptPath.slice(2)) : input.transcriptPath;
+      const rawPath = input.transcriptPath ?? '';
+      const path = (rawPath.startsWith('~/') || rawPath.startsWith('~\\'))
+        ? resolve(homedir(), rawPath.slice(2)) : rawPath;
       const stream = createReadStream(path, { encoding: 'utf8' });
       const lines = createInterface({ input: stream, crlfDelay: Infinity });
       try {

@@ -27,7 +27,11 @@ const shellQuote = (path: string) => WINDOWS
 // Encode once so native Windows shells do not reinterpret paths or CLI arguments.
 function powershellArgs(command: string, args: string[], forwardInput = false) {
   const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
-  const invoke = `& (Get-Command ${quote(command)} -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source ${args.map(quote).join(' ')}`;
+  const isPath = command.includes('/') || command.includes('\\');
+  const target = isPath
+    ? quote(command)
+    : `(Get-Command ${quote(command)} -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source`;
+  const invoke = `& ${target} ${args.map(quote).join(' ')}`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
     ...(forwardInput ? [
@@ -92,9 +96,25 @@ function stopHooks(settings: Record<string, unknown>): HookEntry[] {
   if (entries.some((entry) => !entry || !Array.isArray(entry.hooks))) throw new Error('Invalid Stop hook entry');
   return entries;
 }
+function hookMatchesRunner(hook: CommandHook | undefined): boolean {
+  if (!hook) return false;
+  if (hook.command?.includes(RUNNER) || hook.commandWindows?.includes(RUNNER)) return true;
+  if (hook.args?.some((arg) => arg.includes(RUNNER))) return true;
+  for (const cmd of [hook.command, hook.commandWindows]) {
+    if (!cmd || !cmd.includes('-EncodedCommand')) continue;
+    const match = cmd.match(/-EncodedCommand\s+([A-Za-z0-9+/=]+)/);
+    if (match) {
+      try {
+        const decoded = Buffer.from(match[1], 'base64').toString('utf16le');
+        if (decoded.includes(RUNNER)) return true;
+      } catch {}
+    }
+  }
+  return false;
+}
+
 function managedHook(entries: HookEntry[]) {
-  return entries.flatMap((entry) => entry.hooks ?? []).find((hook) =>
-    hook?.command?.includes(RUNNER) || hook?.args?.some((arg) => arg.includes(RUNNER)));
+  return entries.flatMap((entry) => entry.hooks ?? []).find(hookMatchesRunner);
 }
 
 interface HookOptions {
@@ -164,7 +184,7 @@ export class HookManager {
           installed = Boolean(managedHook(stopHooks(await readJson(this.paths[agent]))));
         } else if (agent === 'agy') {
           const entry = (await readJson(this.paths.agy))[ID] as { enabled?: boolean; Stop?: CommandHook[] } | undefined;
-          installed = entry?.enabled !== false && Boolean(entry?.Stop?.some((hook) => hook.command?.includes(RUNNER)));
+          installed = entry?.enabled !== false && Boolean(entry?.Stop?.some(hookMatchesRunner));
         } else if (agent === 'opencode') {
           installed = await exists(this.paths.opencode);
         } else {
@@ -191,8 +211,6 @@ export class HookManager {
         if (agent === 'claude') {
           hook.command = node;
           hook.args = [this.runner, agent];
-        } else if (agent === 'muse') {
-          hook.command = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
         } else {
           hook.commandWindows = `powershell.exe ${powershellArgs(node, [this.runner, agent], true).join(' ')}`;
         }

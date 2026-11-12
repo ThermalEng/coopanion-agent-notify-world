@@ -22,7 +22,7 @@ it('exposes exactly two buttons per agent and keeps Test disabled until installe
   } as unknown as WebUiPanelContext);
   await vi.waitFor(() => expect(root.querySelector('button')?.disabled).toBe(false));
   const buttons = Array.from(root.querySelectorAll('button'));
-  expect(buttons).toHaveLength(8);
+  expect(buttons).toHaveLength(12);
   expect(buttons.filter((button) => button.textContent === '测试').every((button) => button.disabled)).toBe(true);
   buttons[0].click();
   await vi.waitFor(() => expect(buttons[1].disabled).toBe(false));

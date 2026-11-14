@@ -4,6 +4,8 @@
 
 ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩展。运行时发现由 `hook-runtime.ts` 和两个系统启动脚本负责，`hook.mjs` 是共用发送器。无运行时 npm 依赖，不依赖 Petdex、agent-notify 或其他插件。
 
+扩展图标使用单个 SVG，通过 `prefers-color-scheme` 跟随 Coopanion 当前的深浅主题切换配色。
+
 ## 使用
 
 1. 已发布版本可在 Coopanion 的「World 扩展」中填写 `cortico-world-coding-agent-notify` 安装并启用；市场同步后也可搜索。开发版先构建，再选择本地目录安装。

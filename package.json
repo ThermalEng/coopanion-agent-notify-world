@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "type": "module",
-  "description": "Coopanion World for short coding-agent completion notifications",
+  "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy 原生 hook 并运行回调测试；Agent 完成一轮任务后通过本机临时接口回传最终结论，由 Coopanion 简要总结并通过桌宠播报通知。",
   "license": "AGPL-3.0-or-later",
   "main": "./index.ts",
   "exports": {
@@ -21,11 +21,11 @@
     "locales": {
       "zh": {
         "displayName": "Coding Agent 任务通知",
-        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy hook，由 Coopanion 简要播报任务报告。"
+        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy 原生 hook 并运行回调测试；Agent 完成一轮任务后通过本机临时接口回传最终结论，由 Coopanion 简要总结并通过桌宠播报通知。"
       },
       "en": {
         "displayName": "Coding Agent Notify",
-        "description": "Install native Codex, Claude Code, OpenCode, DSH, Muse Code, agy and WorkBuddy hooks from the World panel. Coopanion summarizes completion reports."
+        "description": "Install native hooks for Codex, Claude Code, OpenCode, DSH, Muse Code, agy, and WorkBuddy on demand from the World panel and run callback tests. When an agent finishes a turn, it sends its final report to Coopanion over a local temporary endpoint so Coopanion can summarize and notify you via the desktop pet."
       }
     }
   },

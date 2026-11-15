@@ -2,6 +2,10 @@
 
 # Changelog
 
+## 1.2.4 — 2026-11-15
+
+- 将 `package.json` 顶层 `description` 更新为中文说明，使扩展市场未同步或查看已装包详情时也能正常显示中文简介；同时扩展 `cortico.locales.zh.description` 与 `cortico.locales.en.description`，保持中英文简介同等详细（涵盖 7 个 Agent 的按需 hook 安装、回调测试与本机临时接口回报流程）。
+
 ## 1.2.3 — 2026-11-15
 
 - 移除扩展简介中「Windows 适配待验证」说明（中英文简介同步更新）。

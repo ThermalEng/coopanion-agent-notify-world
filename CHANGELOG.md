@@ -2,6 +2,10 @@
 
 # Changelog
 
+## 1.2.3 — 2026-11-15
+
+- 移除扩展简介中「Windows 适配待验证」说明（中英文简介同步更新）。
+
 ## 1.2.2 — 2026-11-15
 
 - 修复 Windows 安装 Codex 时 `powershell.exe -EncodedCommand` 未设置 `-OutputFormat Text` 与 UTF-8 输出导致的 CLIXML 乱码，并补充注册表 `PATH`、常见包管理器目录与 IDE 插件内置 `codex.exe` 查找、PowerShell 5.1 空参数与 stderr 警告处理及单引号 `nodePath` 探针修复。

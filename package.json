@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "type": "module",
   "description": "Coopanion World for short coding-agent completion notifications",
   "license": "AGPL-3.0-or-later",
@@ -21,11 +21,11 @@
     "locales": {
       "zh": {
         "displayName": "Coding Agent 任务通知",
-        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy hook，由 Coopanion 简要播报任务报告。Windows 适配待验证。"
+        "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy hook，由 Coopanion 简要播报任务报告。"
       },
       "en": {
         "displayName": "Coding Agent Notify",
-        "description": "Install native Codex, Claude Code, OpenCode, DSH, Muse Code, agy and WorkBuddy hooks from the World panel. Coopanion summarizes completion reports. Windows compatibility is unverified."
+        "description": "Install native Codex, Claude Code, OpenCode, DSH, Muse Code, agy and WorkBuddy hooks from the World panel. Coopanion summarizes completion reports."
       }
     }
   },

@@ -2,6 +2,11 @@
 
 # Changelog
 
+## 1.2.2 — 2026-11-15
+
+- 修复 Windows 安装 Codex 时 `powershell.exe -EncodedCommand` 未设置 `-OutputFormat Text` 与 UTF-8 输出导致的 CLIXML 乱码，并补充注册表 `PATH`、常见包管理器目录与 IDE 插件内置 `codex.exe` 查找、PowerShell 5.1 空参数与 stderr 警告处理及单引号 `nodePath` 探针修复。
+- 安装 Codex hook 优先调用 `codex features enable hooks`；仅在未检测到 `codex` CLI 时直接向 `$CODEX_HOME/config.toml` 安全启用 `[features].hooks = true` 并写入 `hooks.json`，兼顾 Codex 桌面端与 IDE 插件用户且不影响原生 Codex CLI 链路。
+
 ## 1.2.1 — 2026-11-14
 
 - 扩展图标在同一个 SVG 内提供深浅两套配色，跟随 Coopanion 当前主题自动切换；保留原有图形和浅色配色。

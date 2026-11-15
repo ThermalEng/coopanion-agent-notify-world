@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorldHost } from 'cortico/core/types.ts';
 import { collectWorldContexts, renderWorldEnvPrompt } from 'cortico/core/prefix.ts';
 import { checkDescribe } from 'cortico/extensions/describe-export.ts';
-import definition, { CodingAgentNotifyWorld, HookManager } from '../index.ts';
+import definition, { CodingAgentNotifyWorld, enableCodexHooksToml, HookManager, powershellArgs } from '../index.ts';
 import { AGENTS, type Agent, type PanelState } from '../webui.ts';
 
 const cleanups: Array<() => Promise<unknown> | void> = [];
@@ -132,6 +132,44 @@ describe('agent hook installation', () => {
     f.run.mockRejectedValueOnce(new Error('Native feature unavailable'));
     await expect(f.hooks.install('codex')).rejects.toThrow('Native feature unavailable');
     await expect(stat(join(f.home, '.codex', 'hooks.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('falls back to config.toml when the Codex CLI is not found', async () => {
+    const f = await fixture();
+    await mkdir(join(f.home, '.codex'), { recursive: true });
+    await writeFile(join(f.home, '.codex', 'config.toml'), 'model = "gpt-5"\n\n[features]\njs_repl = false\nhooks = false # disabled\n');
+    f.run.mockRejectedValueOnce(Object.assign(new Error('codex: exited with 127'), { stderr: '__COOPANION_COMMAND_NOT_FOUND__' }));
+    await f.hooks.install('codex');
+    expect((await f.hooks.status('codex')).installed).toBe(true);
+    const toml = await readFile(join(f.home, '.codex', 'config.toml'), 'utf8');
+    expect(toml).toContain('model = "gpt-5"');
+    expect(toml).toContain('js_repl = false');
+    expect(toml).toContain('hooks = true # disabled');
+  });
+
+  it('enableCodexHooksToml updates missing, inline, subtable, and CRLF configs safely', () => {
+    expect(enableCodexHooksToml('')).toBe('[features]\nhooks = true\n');
+    expect(enableCodexHooksToml('model = "x"\n[features.context_management]\nexperimental_mode = true\n'))
+      .toBe('model = "x"\n[features.context_management]\nexperimental_mode = true\n\n[features]\nhooks = true\n');
+    expect(enableCodexHooksToml('[features]\njs_repl = false\n')).toBe('[features]\nhooks = true\njs_repl = false\n');
+    expect(enableCodexHooksToml('[features]\r\nhooks = false\r\n')).toBe('[features]\r\nhooks = true\r\n');
+    expect(enableCodexHooksToml('[features]\nhooks = true\n')).toBe('[features]\nhooks = true\n');
+    expect(enableCodexHooksToml('features = { js_repl = false }\n')).toBe('features = { js_repl = false, hooks = true }\n');
+    expect(enableCodexHooksToml('features = { hooks = false }\n')).toBe('features = { hooks = true }\n');
+  });
+
+  it('builds Windows PowerShell invocations with UTF-8 text output, PATH refresh, and missing-CLI marker', () => {
+    const ps = powershellArgs('codex', ['exec', '']);
+    const formatIdx = ps.indexOf('-OutputFormat');
+    expect(formatIdx).toBeGreaterThan(-1);
+    expect(ps[formatIdx + 1]).toBe('Text');
+    const encoded = ps[ps.indexOf('-EncodedCommand') + 1];
+    const script = Buffer.from(encoded, 'base64').toString('utf16le');
+    expect(script).toContain('[Console]::OutputEncoding = $utf8');
+    expect(script).toContain("GetEnvironmentVariable('Path', $scope)");
+    expect(script).toContain('openai.chatgpt-*');
+    expect(script).toContain('__COOPANION_COMMAND_NOT_FOUND__');
+    expect(script).toContain("'\"\"'");
   });
 });
 

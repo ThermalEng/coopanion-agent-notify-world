@@ -26,22 +26,95 @@ const shellQuote = (path: string) => WINDOWS
   : `'${path.replaceAll("'", "'\\''")}'`;
 
 // Encode once so native Windows shells do not reinterpret paths or CLI arguments.
-function powershellArgs(command: string, args: string[], forwardInput = false) {
+export function powershellArgs(command: string, args: string[], forwardInput = false) {
   const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  // Windows PowerShell 5.1 drops bare empty strings passed to native commands via `&`.
+  const nativeArg = (value: string) => (value === '' ? quote('""') : quote(value));
   const isPath = command.includes('/') || command.includes('\\');
-  const target = isPath
-    ? quote(command)
-    : `(Get-Command ${quote(command)} -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source`;
-  const invoke = `& ${target} ${args.map(quote).join(' ')}`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    ...(forwardInput ? [
-      '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
-      `([System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding)).ReadToEnd() | ${invoke}`,
-    ] : [invoke]),
-    'exit $LASTEXITCODE',
+    '$utf8 = [System.Text.UTF8Encoding]::new($false)',
+    '[Console]::OutputEncoding = $utf8',
+    '$OutputEncoding = $utf8',
+    "$extraDirs = @()",
+    "foreach ($scope in @('User', 'Machine')) { $regPath = [Environment]::GetEnvironmentVariable('Path', $scope); if ($regPath) { $extraDirs += ($regPath -split ';') } }",
+    "if ($env:APPDATA) { $extraDirs += (Join-Path $env:APPDATA 'npm') }",
+    "if ($env:LOCALAPPDATA) { $extraDirs += (Join-Path $env:LOCALAPPDATA 'pnpm'); $extraDirs += (Join-Path $env:LOCALAPPDATA 'Volta\\bin'); $extraDirs += (Join-Path $env:LOCALAPPDATA 'Microsoft\\WindowsApps') }",
+    "if ($env:USERPROFILE) { $extraDirs += (Join-Path $env:USERPROFILE '.local\\bin'); $extraDirs += (Join-Path $env:USERPROFILE '.bun\\bin'); $extraDirs += (Join-Path $env:USERPROFILE 'scoop\\shims'); $extraDirs += (Join-Path $env:USERPROFILE '.cargo\\bin') }",
+    "if ($env:VOLTA_HOME) { $extraDirs += (Join-Path $env:VOLTA_HOME 'bin') }",
+    "if ($env:NVM_SYMLINK) { $extraDirs += $env:NVM_SYMLINK }",
+    "if ($env:FNM_MULTISHELL_PATH) { $extraDirs += $env:FNM_MULTISHELL_PATH }",
+    "$seen = @{}; $merged = [System.Collections.Generic.List[string]]::new()",
+    "foreach ($dir in @(($env:PATH -split ';') + $extraDirs)) { $trimmed = if ($dir) { $dir.Trim() } else { '' }; if (-not $trimmed -or $seen.ContainsKey($trimmed.ToLowerInvariant())) { continue }; if ($trimmed -match '(^|[/\\\\])shims[/\\\\]?$' -and (Test-Path -LiteralPath (Join-Path $trimmed 'node.cmd') -PathType Leaf)) { $shim = Get-Content -LiteralPath (Join-Path $trimmed 'node.cmd') -Raw -ErrorAction SilentlyContinue; if ($shim -and $shim.Contains('CORTICO_NODE_EXE')) { continue } }; $seen[$trimmed.ToLowerInvariant()] = $true; $merged.Add($trimmed) }",
+    "$env:PATH = $merged -join ';'",
+    ...(isPath ? [
+      `$target = ${quote(command)}`,
+      "if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { [Console]::Error.WriteLine('__COOPANION_COMMAND_NOT_FOUND__'); exit 127 }",
+    ] : [
+      `$name = ${quote(command)}`,
+      '$cmd = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1',
+      'if (-not $cmd) { $cmd = Get-Command $name -CommandType ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1 }',
+      '$target = if ($cmd) { $cmd.Source } else { $null }',
+      ...(command === 'codex' ? [
+        "if (-not $target -and $env:USERPROFILE) { foreach ($rel in @('.vscode\\extensions', '.cursor\\extensions', '.windsurf\\extensions')) { $extDir = Join-Path $env:USERPROFILE $rel; if (Test-Path -LiteralPath $extDir -PathType Container) { $hit = Get-ChildItem -LiteralPath $extDir -Directory -Filter 'openai.chatgpt-*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { foreach ($arch in @('windows-x86_64', 'windows-arm64', 'win32-x64', 'win32-arm64')) { $exe = Join-Path $_.FullName \"bin\\$arch\\codex.exe\"; if (Test-Path -LiteralPath $exe -PathType Leaf) { $exe; break } } } | Select-Object -First 1; if ($hit) { $target = $hit; break } } } }",
+      ] : []),
+      "if (-not $target) { [Console]::Error.WriteLine('__COOPANION_COMMAND_NOT_FOUND__'); exit 127 }",
+    ]),
+    "$ErrorActionPreference = 'Continue'",
+    ...(forwardInput
+      ? [`([System.IO.StreamReader]::new([Console]::OpenStandardInput(), $utf8)).ReadToEnd() | & $target ${args.map(nativeArg).join(' ')}`]
+      : [`& $target ${args.map(nativeArg).join(' ')}`]),
+    'if ($null -eq $LASTEXITCODE) { exit 0 } else { exit $LASTEXITCODE }',
   ].join('; ');
-  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+  return ['-NoLogo', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-WindowStyle', 'Hidden', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+}
+
+function isMissingCommandError(error: unknown) {
+  const failure = error as NodeJS.ErrnoException & { stderr?: string; message?: string };
+  return failure.code === 'ENOENT'
+    || Boolean(failure.stderr?.includes('__COOPANION_COMMAND_NOT_FOUND__'))
+    || Boolean(failure.stderr?.includes('CommandNotFoundException'))
+    || Boolean(failure.message?.includes('__COOPANION_COMMAND_NOT_FOUND__'));
+}
+
+export function enableCodexHooksToml(text: string): string {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  if (!text.trim()) return `[features]${eol}hooks = true${eol}`;
+  const lines = text.split(/\r?\n/);
+  const headerIdx = lines.findIndex((line) => /^[ \t]*\[features\][ \t]*(?:#.*)?$/.test(line));
+  if (headerIdx !== -1) {
+    let endIdx = lines.length;
+    for (let i = headerIdx + 1; i < lines.length; i++) {
+      if (/^[ \t]*\[/.test(lines[i])) { endIdx = i; break; }
+    }
+    for (let i = headerIdx + 1; i < endIdx; i++) {
+      const match = lines[i].match(/^([ \t]*hooks[ \t]*=[ \t]*)(true|false)([ \t]*(?:#.*)?)$/);
+      if (match) {
+        if (match[2] === 'true') return text;
+        lines[i] = `${match[1]}true${match[3]}`;
+        return lines.join(eol);
+      }
+    }
+    lines.splice(headerIdx + 1, 0, 'hooks = true');
+    return lines.join(eol);
+  }
+  const inlineIdx = lines.findIndex((line) => /^[ \t]*features[ \t]*=[ \t]*\{/.test(line));
+  if (inlineIdx !== -1) {
+    const line = lines[inlineIdx];
+    if (/\bhooks\s*=\s*true\b/.test(line)) return text;
+    if (/\bhooks\s*=\s*false\b/.test(line)) {
+      lines[inlineIdx] = line.replace(/\bhooks(\s*=\s*)false\b/, 'hooks$1true');
+      return lines.join(eol);
+    }
+    const inlineMatch = line.match(/^([ \t]*features[ \t]*=[ \t]*\{)([^\r\n}]*)(\}[ \t]*(?:#.*)?)$/);
+    if (inlineMatch) {
+      const inner = inlineMatch[2].trim();
+      lines[inlineIdx] = `${inlineMatch[1]}${inner ? ` ${inner}, hooks = true ` : ' hooks = true '}${inlineMatch[3]}`;
+      return lines.join(eol);
+    }
+  }
+  const trimmed = text.replace(/(?:\r?\n)+$/, '');
+  return `${trimmed}${eol}${eol}[features]${eol}hooks = true${eol}`;
 }
 
 // Let the OS shell resolve CLI paths, including those added by shell startup files.
@@ -170,12 +243,23 @@ export class HookManager {
   private async nodePath() {
     const marker = '__COOPANION_NODE__';
     const env = await this.runtimeEnv();
-    // Base64 keeps non-ASCII Windows paths intact across PowerShell output encodings.
-    const probe = `if (process.versions.electron || Number(process.versions.node.split('.')[0]) < 22) throw new Error('A standalone Node.js 22+ is required'); ${JSON.stringify(marker)} + Buffer.from(process.execPath).toString('base64')`;
+    // Single quotes avoid PowerShell 5.1 stripping double quotes when invoking node.exe; base64 keeps paths intact.
+    const probe = `if (process.versions.electron || Number(process.versions.node.split('.')[0]) < 22) throw new Error('A standalone Node.js 22+ is required'); '${marker}' + Buffer.from(process.execPath).toString('base64')`;
     const { stdout } = await nativeCommand(NODE, ['-p', probe], env, 10_000);
     const line = stdout.split(/\r?\n/).reverse().find((value) => value.startsWith(marker));
     if (!line) throw new Error('No standalone Node.js 22+ found in the installation environment.');
     return Buffer.from(line.slice(marker.length), 'base64').toString('utf8');
+  }
+
+  private async enableCodexHooksConfig(codexDir: string) {
+    const configPath = join(codexDir, 'config.toml');
+    let current = '';
+    try { current = await readFile(configPath, 'utf8'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const updated = enableCodexHooksToml(current);
+    if (updated !== current) await writeAtomic(configPath, updated);
   }
 
   private async hasHookAssets(hook: CommandHook | undefined) {
@@ -233,7 +317,14 @@ export class HookManager {
         delete existing.commandWindows;
         Object.assign(existing, hook);
       } else entries.push({ hooks: [hook] });
-      if (agent === 'codex') await this.run('codex', ['features', 'enable', 'hooks']);
+      if (agent === 'codex') {
+        try {
+          await this.run('codex', ['features', 'enable', 'hooks']);
+        } catch (error) {
+          if (!isMissingCommandError(error)) throw error;
+          await this.enableCodexHooksConfig(dirname(path));
+        }
+      }
       await writeAtomic(path, JSON.stringify({ ...settings, hooks: { ...settings.hooks as object, Stop: entries } }, null, 2) + '\n');
     } else if (agent === 'agy') {
       const settings = await readJson(this.paths.agy);
@@ -275,9 +366,7 @@ export class HookManager {
       await this.run(agent, args[agent], cwd);
       return { coverage: 'full' };
     } catch (error) {
-      const failure = error as NodeJS.ErrnoException & { stderr?: string };
-      if (!failure.stderr?.includes('__COOPANION_COMMAND_NOT_FOUND__')
-        && !failure.stderr?.includes('CommandNotFoundException')) throw error;
+      if (!isMissingCommandError(error)) throw error;
       // Only a missing CLI falls back. Auth/model/permission failures stay failures.
       await this.notifyTest(agent, marker);
       return { coverage: 'notification-only' };

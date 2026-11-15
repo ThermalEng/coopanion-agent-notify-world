@@ -14,7 +14,7 @@ ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩�
 
 | Agent | 原生接入 |
 | --- | --- |
-| Codex | 用户目录 `hooks.json` 的 `Stop`，用 `codex features enable hooks` 开启功能；最多 5 秒同步发送 |
+| Codex | 用户目录 `hooks.json` 的 `Stop`，优先用 `codex features enable hooks`（找不到 CLI 时直接写 `config.toml` 启用 `[features].hooks`）；最多 5 秒同步发送 |
 | Claude Code | 用户目录 `settings.json` 的 `Stop`；最多 5 秒同步发送，兼容交互会话和单次 CLI |
 | OpenCode | 用户 `plugins/` 目录中的本地插件；V2 监听 `session.execution.succeeded`，V1 ≥ 1.18.29 使用 `session.idle` |
 | Muse Code | `$XDG_CONFIG_HOME/muse/settings.json`（默认 `~/.config/muse/settings.json`）的原生 `Stop`，直接转交 `last_assistant_message` |
@@ -22,7 +22,7 @@ ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩�
 | DSH | `dsh plugin --profile <web/headless> add link:…` 安装本地 Cordis 插件，监听 `session/event` 和 `agent/turn-stopping` |
 | WorkBuddy | 用户目录 `.workbuddy/settings.json` 的原生 `Stop`；最多 5 秒同步发送，直接转交 `last_assistant_message` |
 
-Codex、Claude、Muse、agy、WorkBuddy 的命令型 hook 共用运行时发现器，在 Agent 实际执行环境中寻找并验证可调用的 Node.js 22+，可复用桌面应用自带的独立 Node，无需把它链接到系统目录。OpenCode、DSH 正常回调继续直接使用自身运行时。Codex、DSH 的安装分别需要 `codex`、`dsh` CLI。生成的 Agent 插件只是本扩展的入口，不会安装第三方插件。
+Codex、Claude、Muse、agy、WorkBuddy 的命令型 hook 共用运行时发现器，在 Agent 实际执行环境中寻找并验证可调用的 Node.js 22+，可复用桌面应用自带的独立 Node，无需把它链接到系统目录。OpenCode、DSH 正常回调继续直接使用自身运行时。DSH 的安装需要 `dsh` CLI；Codex 优先调用 `codex` CLI，找不到 CLI（如仅装桌面端或 IDE 插件）时直接更新 `config.toml` 启用 hooks。生成的 Agent 插件只是本扩展的入口，不会安装第三方插件。
 
 World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报告发来，由 Coopanion 当前连接的模型总结，再使用其内置桌宠能力通知。因此需要 Coopanion 正在运行并已连接模型，模型调用会产生正常用量。**任务结论会进入 Coopanion 当前配置的模型上下文和事件历史**。agy 在本机读取原生 hook 指定的会话日志，但只提取当前轮最后一条已完成的模型正文，不转交日志、用户输入或思考内容。通知只转交最终回复／任务结论及项目路径、会话标识，不转交完整对话，不采集屏幕截图、麦克风音频或前台窗口信息。结论本身仍可能包含项目信息，请按所用模型服务的数据政策使用。
 
@@ -30,9 +30,9 @@ World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报�
 
 默认生成目录：`~/.coopanion/agent-hooks`。可通过 `COOPANION_AGENT_HOOK_HOME` 更改；DSH 支持 `COOPANION_DSH_PROFILE`、`DSH_HOME`。也尊重 Agent 自带的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`WORKBUDDY_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。使用多个配置时，应让 Coopanion 启动环境与对应 Agent 一致。
 
-Codex 的 TOML 配置由自身 CLI 修改。已有 JSON 设置保留其他键；无效 JSON 会报错，不会覆盖。
+Codex 优先通过自身 CLI 修改配置；找不到 `codex` CLI 时仅更新 `config.toml` 的 `[features].hooks = true` 并保留其余内容。已有 JSON 设置保留其他键；无效 JSON 会报错，不会覆盖。
 
-七个 Agent 均不需要手动填写可执行文件路径。调用 CLI 时，Linux/macOS 使用用户的交互式登录 shell 查找命令，Windows 使用 PowerShell `Get-Command` 查找，兼容 npm 的 `.cmd` 入口。安装命令型 hook 时可从该环境保存一个 Node 候选路径；找不到宿主 Node 也可安装。
+七个 Agent 均不需要手动填写可执行文件路径。调用 CLI 时，Linux/macOS 使用用户的交互式登录 shell 查找命令，Windows 使用 PowerShell 刷新用户与系统注册表 `PATH` 及常见用户工具目录后通过 `Get-Command` 查找（兼容 npm 的 `.cmd` 入口，Codex 还会回退检查 IDE 扩展内置目录）。安装命令型 hook 时可从该环境保存一个 Node 候选路径；找不到宿主 Node 也可安装。
 
 运行时发现使用 Hook 当时的环境变量（例如 `NODE_BINARY`、`npm_node_execpath`）、可识别的随包独立 Node、PATH、版本管理器入口和安装时的候选路径。WorkBuddy 的受管版本目录由独立适配规则支持；Windows 同时检查应用注册路径附近的独立运行时。所有候选都先验证版本和运行能力；宿主路径在容器、WSL 或更新后失效时会跳过，多个 PATH Node 中第一个不兼容时继续查找。探测与真实发送保留同一份 stdin，限制探测耗时，发送一旦启动不再重试其他运行时。
 

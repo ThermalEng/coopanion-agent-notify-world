@@ -82,25 +82,106 @@ export const OpenCodePlugin = {
 
 export const name = 'coopanion-agent-notify-dsh';
 export const inject = [];
+function dshShouldNotify(session) {
+  const header = session?.header;
+  if (!header || typeof header !== 'object') return true;
+  if (header.origin === 'subagent') return false;
+  if (typeof header.delegationDepth === 'number' && Number.isFinite(header.delegationDepth) && header.delegationDepth > 0) return false;
+  return true;
+}
+function dshSessionId(session) {
+  const id = session?.header?.id ?? session?.id;
+  return typeof id === 'string' ? id : id != null ? String(id) : '';
+}
+function dshTurnEndKind(event) {
+  const reason = event?.data?.reason;
+  return typeof reason === 'string' ? reason : reason?.kind;
+}
 export function apply(ctx) {
-  const reports = new WeakMap();
-  ctx.on('session/event', (session, event) => {
-    if (event.type === 'assistant/message') {
-      reports.set(session, { turn: event.data.turn, summary: textOf(event.data.message.content), interrupted: event.data.interrupted });
+  const reports = new Map();
+  const activityTimers = new Map();
+  const hasService = (service) => {
+    try { return typeof ctx.get === 'function' && ctx.get(service) !== undefined; }
+    catch { return false; }
+  };
+  const clearTimer = (key) => {
+    const timer = activityTimers.get(key);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      activityTimers.delete(key);
     }
-  });
-  ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+  };
+  const sendCompletion = (sessionId, cwd, summary) => {
+    void send('dsh', { summary, session_id: sessionId, cwd }).catch(() => {});
+  };
+  const hasBlockingActivity = async (sessionId) => {
+    if (!sessionId || typeof ctx.waterfall !== 'function') return false;
     try {
-      if (!ctx.get('agents').roots().includes(agent)) return;
-      const report = reports.get(agent.session);
-      reports.delete(agent.session);
-      if (report?.interrupted) return;
-      void send('dsh', {
-        summary: report?.turn === turn ? report.summary : '',
-        session_id: agent.session.header.id, cwd: agent.session.header.cwd,
-      }).catch(() => {});
+      const activity = await ctx.waterfall('workspace/session-activity', { sessionId }, () => Promise.resolve([]));
+      return Array.isArray(activity) && activity.some((item) => {
+        const kind = item?.kind;
+        return kind === 'job' || kind === 'subagent' || kind === 'schedule';
+      });
+    } catch { return false; }
+  };
+  const onSessionEvent = (session, event) => {
+    try {
+      if (!event || typeof event !== 'object') return;
+      if (!dshShouldNotify(session)) return;
+      const sessionId = dshSessionId(session);
+      const key = sessionId || 'unknown';
+      if (event.type === 'turn/start') {
+        clearTimer(key);
+        reports.delete(key);
+        return;
+      }
+      if (event.type === 'assistant/message') {
+        if (event.data?.interrupted) return;
+        const summary = textOf(event.data?.message?.content);
+        if (summary.trim()) reports.set(key, { turn: event.data?.turn, summary });
+        return;
+      }
+      if (event.type === 'turn/end') {
+        const report = reports.get(key);
+        reports.delete(key);
+        if (dshTurnEndKind(event) !== 'completed') {
+          clearTimer(key);
+          return;
+        }
+        const turn = event.data?.turn;
+        const summary = (report && (turn === undefined || report.turn === undefined || report.turn === turn))
+          ? report.summary : '';
+        const cwd = session?.header?.cwd ?? session?.cwd ?? '';
+        if (typeof ctx.waterfall === 'function' && hasService('webServer')) {
+          clearTimer(key);
+          const timer = setTimeout(() => {
+            activityTimers.delete(key);
+            void (async () => {
+              if (await hasBlockingActivity(sessionId)) return;
+              sendCompletion(sessionId, cwd, summary);
+            })().catch(() => {});
+          }, 1500);
+          activityTimers.set(key, timer);
+        } else {
+          sendCompletion(sessionId, cwd, summary);
+        }
+      }
     } catch { /* A notification must never interrupt an agent. */ }
-  });
+  };
+  const disposeEvent = ctx.on('session/event', onSessionEvent, { global: true });
+  const disposeSession = ctx.on('session/disposed', (session) => {
+    const key = dshSessionId(session) || 'unknown';
+    clearTimer(key);
+    reports.delete(key);
+  }, { global: true });
+  const cleanup = () => {
+    for (const timer of activityTimers.values()) clearTimeout(timer);
+    activityTimers.clear();
+    reports.clear();
+    if (typeof disposeEvent === 'function') disposeEvent();
+    if (typeof disposeSession === 'function') disposeSession();
+  };
+  if (typeof ctx.effect === 'function') ctx.effect(() => cleanup, name);
 }
 
 async function main() {

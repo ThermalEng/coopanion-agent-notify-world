@@ -19,14 +19,14 @@ ThermalEng 维护的第三方 Coopanion World 扩展，非 Pal AI Lab 官方扩�
 | OpenCode | 用户 `plugins/` 目录中的本地插件；V2 监听 `session.execution.succeeded`，V1 ≥ 1.18.29 使用 `session.idle` |
 | Muse Code | `$XDG_CONFIG_HOME/muse/settings.json`（默认 `~/.config/muse/settings.json`）的原生 `Stop`，直接转交 `last_assistant_message` |
 | agy（Antigravity CLI） | `~/.gemini/config/hooks.json` 的具名 `Stop`；仅在成功且完全空闲时，从 `transcriptPath` 流式提取当前轮最后一条模型回复 |
-| DSH | `dsh plugin --profile <web/headless> add link:…` 安装本地 Cordis 插件，监听 `session/event` 和 `agent/turn-stopping` |
+| DSH | `dsh plugin --profile <web/desktop/headless> add link:…` 安装本地 Cordis 插件，监听 `session/event`（`turn/end`）并在桌面/Web 宿主通过 `workspace/session-activity` 避让仍在运行的子任务 |
 | WorkBuddy | 用户目录 `.workbuddy/settings.json` 的原生 `Stop`；最多 5 秒同步发送，直接转交 `last_assistant_message` |
 
 Codex、Claude、Muse、agy、WorkBuddy 的命令型 hook 共用运行时发现器，在 Agent 实际执行环境中寻找并验证可调用的 Node.js 22+，可复用桌面应用自带的独立 Node，无需把它链接到系统目录。OpenCode、DSH 正常回调继续直接使用自身运行时。DSH 的安装需要 `dsh` CLI；Codex 优先调用 `codex` CLI，找不到 CLI（如仅装桌面端或 IDE 插件）时直接更新 `config.toml` 启用 hooks。生成的 Agent 插件只是本扩展的入口，不会安装第三方插件。
 
 World 运行时开启带令牌的 `127.0.0.1` 临时接口；hook 将最终报告发来，由 Coopanion 当前连接的模型总结，再使用其内置桌宠能力通知。因此需要 Coopanion 正在运行并已连接模型，模型调用会产生正常用量。**任务结论会进入 Coopanion 当前配置的模型上下文和事件历史**。agy 在本机读取原生 hook 指定的会话日志，但只提取当前轮最后一条已完成的模型正文，不转交日志、用户输入或思考内容。通知只转交最终回复／任务结论及项目路径、会话标识，不转交完整对话，不采集屏幕截图、麦克风音频或前台窗口信息。结论本身仍可能包含项目信息，请按所用模型服务的数据政策使用。
 
-「测试」会在临时空目录调用对应 Agent CLI，用当前模型完成一个只回复随机标识的最小任务（会产生正常模型用量，不开启权限绕过），然后等待该 Agent 的原生 hook 将相同标识交回 Coopanion；命令成功但没有回报仍显示失败。找不到 CLI 时才退回通知发送测试，明确提示“PATH 未检测到对应命令，本次仅测试通知发送，请手动测试 Agent 完成通知”。页面确认的是回报已进入 Coopanion，桌宠是否实际播报仍请用户确认。不提供离线队列；Coopanion 关闭时通知跳过，不影响 Agent 完成任务。重新点击安装不会重复添加 hook。部分 Agent（如 Codex）安装或更新 hook 后，需要重新打开 Agent 并授权 hook，再进行测试。DSH 的安装会同时注册所选 profile（默认 web）和 headless profile；此前仅安装 web hook 的用户需重新点击安装，CLI 测试使用 headless 自身的模型配置。
+「测试」会在临时空目录调用对应 Agent CLI，用当前模型完成一个只回复随机标识的最小任务（会产生正常模型用量，不开启权限绕过），然后等待该 Agent 的原生 hook 将相同标识交回 Coopanion；命令成功但没有回报仍显示失败。找不到 CLI 时才退回通知发送测试，明确提示“PATH 未检测到对应命令，本次仅测试通知发送，请手动测试 Agent 完成通知”。页面确认的是回报已进入 Coopanion，桌宠是否实际播报仍请用户确认。不提供离线队列；Coopanion 关闭时通知跳过，不影响 Agent 完成任务。重新点击安装不会重复添加 hook。部分 Agent（如 Codex）安装或更新 hook 后，需要重新打开 Agent 并授权 hook，再进行测试。DSH 的安装会同时注册所选 profile（默认 web，检测到本机已初始化的 desktop profile 时一并注册）和 headless profile；此前仅安装旧版 hook 的用户需重新点击安装，CLI 测试使用 headless 自身的模型配置。
 
 默认生成目录：`~/.coopanion/agent-hooks`。可通过 `COOPANION_AGENT_HOOK_HOME` 更改；DSH 支持 `COOPANION_DSH_PROFILE`、`DSH_HOME`。也尊重 Agent 自带的 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`WORKBUDDY_CONFIG_DIR` 和 `XDG_CONFIG_HOME`。使用多个配置时，应让 Coopanion 启动环境与对应 Agent 一致。
 

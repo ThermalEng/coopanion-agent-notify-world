@@ -410,22 +410,89 @@ process.stdin.on('end', () => fs.writeFileSync(process.env.COOPANION_TEST_RECEIP
     expect(JSON.stringify(f.pushEvent.mock.calls)).not.toContain('private');
   });
 
-  it('DSH consumes native session events, filters subagents and skips interrupted turns', async () => {
+  it('DSH uses turn/end, filters subagents/delegations, preserves non-empty text and skips non-completed turns', async () => {
     const f = await mounted();
     await f.invoke('install', 'dsh');
     await probe(join((await f.hooks.status('dsh')).detail, 'index.js'), `
       const handlers = new Map();
-      const root = {session:{header:{id:'root',cwd:'/test/project'}}};
-      const child = {session:{header:{id:'child'}}};
-      plugin.apply({on:(event,fn)=>handlers.set(event,fn),get:()=>({roots:()=>[root]})});
-      const message = (agent,turn,interrupted=false) => handlers.get('session/event')(agent.session,{type:'assistant/message',data:{turn,message:{content:[{type:'reasoning',text:'private'},{type:'text',text:'DSH result'}]},interrupted}});
-      message(child,1); handlers.get('agent/turn-stopping')({agent:child,turn:1});
-      message(root,1); handlers.get('agent/turn-stopping')({agent:root,turn:1});
-      message(root,2,true); handlers.get('agent/turn-stopping')({agent:root,turn:2});
+      const optionsSeen = new Map();
+      const subagent = {header:{id:'child',origin:'subagent',parentSession:'root'}};
+      const delegated = {header:{id:'delegated',delegationDepth:1}};
+      const forked = {header:{id:'forked',origin:'user',parentSession:'root',cwd:'/test/project'}};
+      plugin.apply({
+        on:(event,fn,opts)=>{ handlers.set(event,fn); optionsSeen.set(event,opts); return ()=>{}; },
+      });
+      assert.deepEqual(optionsSeen.get('session/event'), {global:true});
+      const emit = (session,type,data) => handlers.get('session/event')(session,{type,data});
+      const msg = (session,turn,text,interrupted=false) => emit(session,'assistant/message',{
+        turn, message:{content:[{type:'reasoning',text:'private'},...(text?[{type:'text',text}]:[])]}, interrupted,
+      });
+      // Subagents and delegated sessions must not notify.
+      msg(subagent,1,'Child result'); emit(subagent,'turn/end',{turn:1,reason:{kind:'completed'}});
+      msg(delegated,1,'Delegated result'); emit(delegated,'turn/end',{turn:1,reason:{kind:'completed'}});
+      // Forked top-level session preserves earlier text across empty tool-call steps.
+      msg(forked,1,'DSH result');
+      msg(forked,1,'');
+      emit(forked,'turn/end',{turn:1,reason:{kind:'completed'}});
+      // Aborted/error/interrupted turns do not notify even after an assistant/message.
+      msg(forked,2,'Aborted text'); emit(forked,'turn/end',{turn:2,reason:{kind:'aborted'}});
+      msg(forked,3,'Error text'); emit(forked,'turn/end',{turn:3,reason:{kind:'error'}});
+      msg(forked,4,'Interrupted text',true); emit(forked,'turn/end',{turn:4,reason:{kind:'interrupted'}});
     `);
     await vi.waitFor(() => expect(f.pushEvent).toHaveBeenCalledOnce());
     expect(f.pushEvent.mock.calls[0]?.[0]).toMatchObject({ text: expect.stringContaining('DSH result') });
     expect(JSON.stringify(f.pushEvent.mock.calls)).not.toContain('private');
+  });
+
+  it('DSH activity gate suppresses completion while subagents or jobs run and cleans up on dispose', async () => {
+    const f = await mounted();
+    await f.invoke('install', 'dsh');
+    await probe(join((await f.hooks.status('dsh')).detail, 'index.js'), `
+      const handlers = new Map();
+      const disposers = [];
+      plugin.apply({
+        on:(event,fn)=>{ handlers.set(event,fn); return ()=>{}; },
+        get:(name)=>name==='webServer'?{}:undefined,
+        effect:(fn)=>{ disposers.push(fn()); },
+        waterfall:async(_name,{sessionId})=>sessionId==='busy'?[{kind:'subagent'}]:[],
+      });
+      const emit = (session,type,data) => handlers.get('session/event')(session,{type,data});
+      const busy = {header:{id:'busy',cwd:'/test/busy'}};
+      const idle = {header:{id:'idle',cwd:'/test/idle'}};
+      const cancelled = {header:{id:'cancelled',cwd:'/test/cancelled'}};
+      emit(busy,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Busy premature'}]}});
+      emit(busy,'turn/end',{turn:1,reason:{kind:'completed'}});
+      emit(idle,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Idle done'}]}});
+      emit(idle,'turn/end',{turn:1,reason:{kind:'completed'}});
+      emit(cancelled,'assistant/message',{turn:1,message:{content:[{type:'text',text:'Disposed before gate'}]}});
+      emit(cancelled,'turn/end',{turn:1,reason:{kind:'completed'}});
+      await new Promise((r)=>setTimeout(r, 1750));
+      // Dispose after busy/idle settle and verify a second pending turn is cancelled cleanly.
+      emit(cancelled,'assistant/message',{turn:2,message:{content:[{type:'text',text:'Should never send'}]}});
+      emit(cancelled,'turn/end',{turn:2,reason:{kind:'completed'}});
+      for (const dispose of disposers) dispose();
+      await new Promise((r)=>setTimeout(r, 1750));
+    `);
+    await vi.waitFor(() => expect(f.pushEvent).toHaveBeenCalledTimes(2));
+    const texts = f.pushEvent.mock.calls.map((c) => JSON.stringify(c[0]));
+    expect(texts.some((t) => t.includes('Idle done'))).toBe(true);
+    expect(texts.some((t) => t.includes('Disposed before gate'))).toBe(true);
+    expect(texts.some((t) => t.includes('Busy premature'))).toBe(false);
+    expect(texts.some((t) => t.includes('Should never send'))).toBe(false);
+  });
+
+  it('DSH registers desktop profile when initialized and detects desktop-only status', async () => {
+    const f = await mounted();
+    const desktopManifest = join(f.home, '.dsh', 'profiles', 'desktop', 'package.json');
+    await mkdir(join(f.home, '.dsh', 'profiles', 'desktop'), { recursive: true });
+    await writeFile(desktopManifest, JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+    await f.invoke('install', 'dsh');
+    const pluginDir = (await f.hooks.status('dsh')).detail;
+    expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'web', 'add', `link:${pluginDir}`]);
+    expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'headless', 'add', `link:${pluginDir}`]);
+    expect(f.run).toHaveBeenCalledWith('dsh', ['plugin', '--profile', 'desktop', 'add', `link:${pluginDir}`]);
+    await rm(join(f.home, '.dsh', 'profiles', 'web'), { recursive: true, force: true });
+    expect((await f.hooks.status('dsh')).installed).toBe(true);
   });
 });
 

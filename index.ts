@@ -197,16 +197,18 @@ export class HookManager {
   readonly runner: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly paths: Record<Agent, string>;
-  private readonly dshManifest: string;
+  private readonly dshHome: string;
   private readonly profile: string;
   private readonly run: NonNullable<HookOptions['run']>;
 
   constructor(options: HookOptions = {}) {
     const home = options.homeDir ?? homedir();
     const env = options.env ?? process.env;
-    this.env = { ...env, CODEX_HOME: env.CODEX_HOME || join(home, '.codex'), DSH_HOME: env.DSH_HOME || join(home, '.dsh') };
+    const dshHome = env.DSH_HOME || join(home, '.dsh');
+    this.env = { ...env, CODEX_HOME: env.CODEX_HOME || join(home, '.codex'), DSH_HOME: dshHome };
     this.dir = options.hookDir ?? this.env.COOPANION_AGENT_HOOK_HOME ?? join(home, '.coopanion', 'agent-hooks');
     this.runner = join(this.dir, RUNNER);
+    this.dshHome = dshHome;
     this.profile = this.env.COOPANION_DSH_PROFILE || 'web';
     const codex = this.env.CODEX_HOME || join(home, '.codex');
     this.paths = {
@@ -218,7 +220,6 @@ export class HookManager {
       agy: join(home, '.gemini', 'config', 'hooks.json'),
       workbuddy: join(this.env.WORKBUDDY_CONFIG_DIR || join(home, '.workbuddy'), 'settings.json'),
     };
-    this.dshManifest = join(this.env.DSH_HOME || join(home, '.dsh'), 'profiles', this.profile, 'package.json');
     this.run = options.run ?? (async (command, args, cwd) => { await nativeCommand(command, args, await this.runtimeEnv(), 120_000, cwd); });
   }
 
@@ -268,6 +269,15 @@ export class HookManager {
     return !usesLauncher || (await Promise.all(LAUNCHERS.map((name) => exists(join(this.dir, name))))).every(Boolean);
   }
 
+  private async dshProfileInstalled(profile: string): Promise<boolean> {
+    try {
+      const manifest = await readJson(join(this.dshHome, 'profiles', profile, 'package.json')) as { dsh?: { profile?: { bundles?: string[] } } };
+      return Boolean(manifest.dsh?.profile?.bundles?.includes(DSH_NAME));
+    } catch {
+      return false;
+    }
+  }
+
   async status(agent: Agent): Promise<HookStatus> {
     let installed = false;
     if (await exists(this.runner)) {
@@ -279,10 +289,9 @@ export class HookManager {
           installed = entry?.enabled !== false && await this.hasHookAssets(entry?.Stop?.find(hookMatchesRunner));
         } else if (agent === 'opencode') {
           installed = await exists(this.paths.opencode);
-        } else {
-          const manifest = await readJson(this.dshManifest) as { dsh?: { profile?: { bundles?: string[] } } };
-          installed = Boolean(manifest.dsh?.profile?.bundles?.includes(DSH_NAME))
-            && await exists(join(this.paths.dsh, 'index.js'));
+        } else if (await exists(join(this.paths.dsh, 'index.js'))) {
+          installed = await this.dshProfileInstalled(this.profile)
+            || (!this.env.COOPANION_DSH_PROFILE && await this.dshProfileInstalled('desktop'));
         }
       } catch { /* A missing or invalid agent configuration is not installed. */ }
     }
@@ -343,7 +352,11 @@ export class HookManager {
         dsh: { bundle: { patch: './cordis.patch.yml' } },
       }, null, 2));
       await writeAtomic(join(dir, 'cordis.patch.yml'), `- insert:\n    - id: ${DSH_NAME}\n      name: ${DSH_NAME}\n`);
-      for (const profile of new Set([this.profile, 'headless'])) {
+      const profiles = new Set([this.profile, 'headless']);
+      if (!this.env.COOPANION_DSH_PROFILE && await exists(join(this.dshHome, 'profiles', 'desktop', 'package.json'))) {
+        profiles.add('desktop');
+      }
+      for (const profile of profiles) {
         await this.run('dsh', ['plugin', '--profile', profile, 'add', `link:${dir}`]);
       }
     }

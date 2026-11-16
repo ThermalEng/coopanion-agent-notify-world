@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-coding-agent-notify",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "type": "module",
   "description": "在 World 配置页按需安装 Codex、Claude Code、OpenCode、DSH、Muse Code、agy、WorkBuddy 原生 hook 并运行回调测试；Agent 完成一轮任务后通过本机临时接口回传最终结论，由 Coopanion 简要总结并通过桌宠播报通知。",
   "license": "AGPL-3.0-or-later",

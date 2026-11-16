@@ -2,6 +2,11 @@
 
 # Changelog
 
+## 1.2.5 — 2026-11-16
+
+- 改进 DSH Cordis 钩子：改用带 `{ global: true }` 的 `session/event` (`turn/end`) 判断回合是否真正完成，过滤 `aborted` / `blocked` / `interrupted` / `error` / `max-tokens`；改用 `header.origin` 与 `delegationDepth` 过滤子代理并保留普通 fork 对话；修复 `assistant/message` 空内容覆盖已有正文与 `sessionId` 缓存清理；在带 `webServer` 的长驻宿主加入 1.5 秒 `workspace/session-activity` 活动门防团队/后台子任务误报并随卸载清理定时器。
+- 安装与状态检测自动兼容已初始化的 DSH `desktop` profile。
+
 ## 1.2.4 — 2026-11-15
 
 - 将 `package.json` 顶层 `description` 更新为中文说明，使扩展市场未同步或查看已装包详情时也能正常显示中文简介；同时扩展 `cortico.locales.zh.description` 与 `cortico.locales.en.description`，保持中英文简介同等详细（涵盖 7 个 Agent 的按需 hook 安装、回调测试与本机临时接口回报流程）。

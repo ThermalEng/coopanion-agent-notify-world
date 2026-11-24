@@ -2,6 +2,17 @@
 
 # Changelog
 
+## 1.3.1 — 2026-11-24
+
+- 将「指令回传」拆分为独立设置选项卡，明确声明仅支持终端 CLI 会话（不支持桌面客户端或 IDE 插件），触发条件扩展为「4 个选项以内的简单选择题」或「是否同意/继续等简单判断题」。
+- 修复 Codex 指令回传：改用 `codex queue --thread <id> --message <msg> --resume` 直接入队续接当前 CLI 会话，不再提示 `/resume`；并将后台命令启动探针窗口延长至 1500ms 且记录详细错误文本。
+- 细化 `agy` 与 Claude Code 回传说明：明确提示需先退出当前 CLI 再恢复对话（`agy` 使用 `/resume`，Claude Code 退出后运行 `claude --resume`，勿在未退出的旧终端内直接输入 `/resume`）。
+
+## 1.3.0 — 2026-11-24
+
+- 新增可选的「指令回传（2 选 1 / 3 选 1）」功能：设置页增加主开关与按 Agent 勾选（默认关闭），仅当已勾选 Agent 在结论中提出简单的 2 选 1 或 3 选 1 问题并由用户明确选择后，才异步向原会话发送后续指令；未开启或未勾选时提示 Coopanion 不提供可执行操作选项。
+- 暴露 `reply_coding_agent` 工具与非阻塞原生命令派发：支持 Codex、Claude Code、Antigravity (`agy`) 后台续跑（提示用户需 `/resume` 回到对话）以及 OpenCode 直接续接当前会话，防止自动回复死循环并阻止同会话并发重入。
+
 ## 1.2.5 — 2026-11-16
 
 - 改进 DSH Cordis 钩子：改用带 `{ global: true }` 的 `session/event` (`turn/end`) 判断回合是否真正完成，过滤 `aborted` / `blocked` / `interrupted` / `error` / `max-tokens`；改用 `header.origin` 与 `delegationDepth` 过滤子代理并保留普通 fork 对话；修复 `assistant/message` 空内容覆盖已有正文与 `sessionId` 缓存清理；在带 `webServer` 的长驻宿主加入 1.5 秒 `workspace/session-activity` 活动门防团队/后台子任务误报并随卸载清理定时器。

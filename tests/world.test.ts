@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorldHost } from 'cortico/core/types.ts';
 import { collectWorldContexts, renderWorldEnvPrompt } from 'cortico/core/prefix.ts';
 import { checkDescribe } from 'cortico/extensions/describe-export.ts';
-import definition, { CodingAgentNotifyWorld, enableCodexHooksToml, HookManager, powershellArgs } from '../index.ts';
+import definition, { CodingAgentNotifyWorld, enableCodexHooksToml, HookManager, powershellArgs, replyCommandSpec, type CodingAgentNotifySection } from '../index.ts';
 import { AGENTS, type Agent, type PanelState } from '../webui.ts';
 
 const cleanups: Array<() => Promise<unknown> | void> = [];
@@ -546,5 +546,120 @@ describe('managed hook upgrades', () => {
     expect(JSON.stringify(settings.hooks.Stop[1])).not.toContain('missing-host-node');
     expect(JSON.stringify(settings.hooks.Stop[1])).not.toContain('obsolete');
     expect((await f.hooks.status('claude')).installed).toBe(true);
+  });
+});
+
+describe('follow-up replies', () => {
+  async function mountedReply() {
+    const f = await fixture();
+    const dispatch = vi.fn(async (_command: string, _args: string[], _cwd?: string) => {});
+    const hooks = new HookManager({ homeDir: f.home, hookDir: f.hooks.dir, env: {}, run: f.run, dispatch });
+    const cfg: CodingAgentNotifySection = { enabled: true, replyEnabled: false, replyAgents: [] };
+    const world = new CodingAgentNotifyWorld('Asia/Shanghai', hooks, {
+      get: () => cfg,
+      persist: (patch) => Object.assign(cfg, patch),
+    });
+    const pushEvent = vi.fn(async (event: unknown) => event);
+    const host = { pushEvent, log: { warn: vi.fn() } } as unknown as WorldHost;
+    cleanups.push(() => world.stop());
+    await world.start(host);
+    const ui = world.webUi('zh');
+    expect(ui.panels).toEqual([
+      { id: 'hooks', title: 'Hook 安装与测试', getMethods: ['state'] },
+      { id: 'reply', title: '指令回传', getMethods: ['state'] },
+    ]);
+    const invoke = async (method: string, ...args: unknown[]) => await ui.invoke!('reply', method, args) as PanelState;
+    return { ...f, hooks, cfg, world, pushEvent, dispatch, invoke };
+  }
+
+  async function postReport(hookDir: string, payload: object) {
+    const endpoint = JSON.parse(await readFile(join(hookDir, 'endpoint.json'), 'utf8'));
+    const res = await fetch(endpoint.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${endpoint.token}` },
+      body: JSON.stringify(payload),
+    });
+    expect(res.status).toBe(202);
+  }
+
+  it('always registers reply_coding_agent without drift, normalizes agents, and blocks disabled calls', async () => {
+    const f = await mountedReply();
+    expect(f.world.tools().map((t) => t.name)).toEqual(['reply_coding_agent']);
+
+    const state = await f.invoke('setReply', { enabled: true, agents: ['agy', 'dsh', 'opencode', 'agy'] });
+    expect(state.reply).toEqual({ enabled: true, agents: ['opencode', 'agy'] });
+    expect(f.cfg).toEqual({ enabled: true, replyEnabled: true, replyAgents: ['opencode', 'agy'] });
+    expect(f.world.tools().map((t) => t.name)).toEqual(['reply_coding_agent']);
+
+    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a-disabled', workspace: f.root, summary: '1 or 2' });
+    const targetId = (f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+    await f.invoke('setReply', { enabled: false });
+    expect(f.world.tools().map((t) => t.name)).toEqual(['reply_coding_agent']);
+    const denied = await f.world.tools()[0].handler({ targetId, instruction: '选 1' }, { role: 'bot', log: console as never });
+    expect(denied).toMatchObject({ failed: true });
+    expect(f.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('annotates completion events according to reply eligibility and mode', async () => {
+    const f = await mountedReply();
+    await f.invoke('setReply', { enabled: true, agents: ['codex', 'claude', 'agy'] });
+
+    await postReport(f.hooks.dir, { agent: 'opencode', sessionId: 'o1', workspace: f.root, summary: '选 A 还是 B？' });
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c1', workspace: f.root, summary: '是否继续？' });
+    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a1', workspace: f.root, summary: '请四选一：1、2、3、4' });
+    await postReport(f.hooks.dir, { agent: 'claude', sessionId: 'cl1', workspace: f.root, summary: '是否同意执行？' });
+
+    expect(f.pushEvent).toHaveBeenCalledTimes(4);
+    const [openCodeEvent, codexEvent, agyEvent, claudeEvent] = f.pushEvent.mock.calls.map((c) => c[0] as { text: string; meta: Record<string, unknown> });
+
+    expect(openCodeEvent.meta.replyTargetId).toBeUndefined();
+    expect(openCodeEvent.text).toContain('不要提供可代为执行的操作选项');
+
+    expect(codexEvent.meta.replyTargetId).toBe('r1');
+    expect(codexEvent.meta.replyMode).toBe('live-session');
+    expect(codexEvent.text).toContain('4 个选项以内的简单选择题');
+    expect(codexEvent.text).toContain('简单判断题');
+    expect(codexEvent.text).not.toContain('/resume');
+
+    expect(agyEvent.meta.replyTargetId).toBe('r2');
+    expect(agyEvent.meta.replyMode).toBe('background-resume');
+    expect(agyEvent.text).toContain('在命令行 /resume 查看');
+
+    expect(claudeEvent.meta.replyTargetId).toBe('r3');
+    expect(claudeEvent.meta.replyMode).toBe('background-resume');
+    expect(claudeEvent.text).toContain('在命令行 /resume 查看');
+  });
+
+  it.each(['codex', 'claude', 'opencode', 'agy'] as const)('dispatches follow-up command for %s and validates guardrails', async (agent) => {
+    const f = await mountedReply();
+    await f.invoke('setReply', { enabled: true, agents: [agent] });
+    await postReport(f.hooks.dir, { agent, sessionId: `sess-${agent}`, workspace: f.root, summary: '1. 方案 A  2. 方案 B' });
+
+    const event = f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } };
+    const targetId = event.meta.replyTargetId;
+    const tool = f.world.tools()[0];
+
+    const missingTarget = await tool.handler({ targetId: 'r999', instruction: '选 1' }, { role: 'bot', log: console as never });
+    expect(missingTarget).toMatchObject({ failed: true });
+
+    const blank = await tool.handler({ targetId, instruction: '   ' }, { role: 'bot', log: console as never });
+    expect(blank).toMatchObject({ failed: true });
+
+    const ok = await tool.handler({ targetId, instruction: '选方案 1' }, { role: 'bot', log: console as never });
+    const spec = replyCommandSpec(agent, `sess-${agent}`, '选方案 1')!;
+    expect(f.dispatch).toHaveBeenCalledWith(spec.command, spec.args, f.root);
+    expect(typeof ok).toBe('string');
+    if (agent === 'codex') {
+      expect(spec.args).toEqual(['queue', '--thread', `sess-${agent}`, '--message', '选方案 1', '--resume']);
+      expect(ok as string).not.toContain('/resume');
+    } else if (agent === 'opencode') {
+      expect(ok as string).not.toContain('/resume');
+    } else {
+      expect(ok as string).toContain('在命令行 /resume 查看');
+    }
+
+    await f.invoke('setReply', { enabled: false });
+    const disabled = await tool.handler({ targetId, instruction: '选方案 2' }, { role: 'bot', log: console as never });
+    expect(disabled).toMatchObject({ failed: true });
   });
 });

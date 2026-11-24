@@ -40,7 +40,7 @@ Codex 优先通过自身 CLI 修改配置；找不到 `codex` CLI 时仅更新 `
 
 升级后对已安装的命令型 Agent 重新点击「安装 hook」，即可替换旧绝对 Node 命令；其他 hook 和 Agent 设置保留。配置页的「已安装」表示配置已注册，具体 Agent 的环境和网络可用性仍由原生回调测试确认。
 
-设置页分为“Hook 安装与测试”和“通知总结提示词”。提示词用于指导 Coopanion 总结任务结论，保存后的部署覆盖由框架自动读取。未列出的 Agent 可到 [GitHub](https://github.com/ThermalEng/coopanion-agent-notify-world) 提交 PR 或 Issue，作者会尽快处理。
+设置页分为“Hook 安装与测试”、“指令回传”和“通知总结提示词”。默认关闭指令回传，**仅支持终端 CLI 会话，不支持桌面客户端或 IDE 插件**；开启并勾选具体 Agent 后，仅当该 Agent 提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题且由你明确选择/确认时，Coopanion 才会异步发送后续指令：Codex（`codex queue`）与 OpenCode 会直接续接当前会话，无需 `/resume`；Antigravity (agy) 需先退出当前 CLI 再用 `/resume` 回到对话；Claude Code 需先退出当前 CLI 再运行 `claude --resume`（不要在未退出的旧窗口内直接输入 `/resume`）。提示词用于指导 Coopanion 总结任务结论，保存后的部署覆盖由框架自动读取。未列出的 Agent 可到 [GitHub](https://github.com/ThermalEng/coopanion-agent-notify-world) 提交 PR 或 Issue，作者会尽快处理。
 
 ## Windows
 

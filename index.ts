@@ -8,10 +8,10 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { systemLanguage, type Language } from 'cortico/core/language.ts';
-import type { World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { ToolDef, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import type { WorldDefinition, WorldDescribe, WorldSection } from 'cortico/world.ts';
-import { AGENTS, LABELS, uiText, type Agent, type HookStatus, type TestResult } from './webui.ts';
+import { AGENTS, LABELS, REPLY_MODES, uiText, type Agent, type HookStatus, type ReplyConfigState, type TestResult } from './webui.ts';
 import { LAUNCHERS, runtimeCommand, runtimeInvocation } from './hook-runtime.ts';
 
 const ID = 'coding-agent-notify';
@@ -117,6 +117,21 @@ export function enableCodexHooksToml(text: string): string {
   return `${trimmed}${eol}${eol}[features]${eol}hooks = true${eol}`;
 }
 
+export interface CodingAgentNotifySection extends WorldSection {
+  replyEnabled?: boolean;
+  replyAgents?: Agent[];
+}
+
+export function replyCommandSpec(agent: Agent, sessionId: string, instruction: string): { command: string; args: string[] } | null {
+  switch (agent) {
+    case 'codex': return { command: 'codex', args: ['queue', '--thread', sessionId, '--message', instruction, '--resume'] };
+    case 'claude': return { command: 'claude', args: ['--resume', sessionId, '--print', instruction] };
+    case 'opencode': return { command: 'opencode', args: ['run', '--session', sessionId, instruction] };
+    case 'agy': return { command: 'agy', args: ['--conversation', sessionId, '--print', instruction] };
+    default: return null;
+  }
+}
+
 // Let the OS shell resolve CLI paths, including those added by shell startup files.
 function nativeCommand(command: string, args: string[], env: NodeJS.ProcessEnv, timeout = 120_000, cwd?: string) {
   const childEnv = { ...process.env, ...env };
@@ -132,6 +147,68 @@ function nativeCommand(command: string, args: string[], env: NodeJS.ProcessEnv, 
       .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim().slice(-3000);
     failure.message = `${command}: ${failure.killed ? `timed out after ${timeout / 1000}s` : `exited with ${failure.code ?? failure.signal ?? 'an error'}`}${output ? `\n${output}` : ''}`;
     throw failure;
+  });
+}
+
+function spawnNativeCommand(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd?: string,
+  onExit?: (error?: Error) => void,
+): Promise<void> {
+  const childEnv = { ...process.env, ...env };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  const shell = WINDOWS ? 'powershell.exe' : env.SHELL || userInfo().shell || '/bin/sh';
+  const shellArgs = WINDOWS
+    ? powershellArgs(command, args)
+    : ['-ilc', `command -v ${shellQuote(command)} >/dev/null || { printf '%s\\n' '__COOPANION_COMMAND_NOT_FOUND__' >&2; exit 127; }; exec ${[command, ...args].map(shellQuote).join(' ')}`];
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(shell, shellArgs, {
+      cwd,
+      env: childEnv,
+      stdio: ['pipe', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    child.stdin?.end();
+    let stderr = '';
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr = (stderr + chunk).slice(-6000);
+    });
+    let settled = false;
+    let exited = false;
+    const finishExit = (error?: Error) => {
+      if (exited) return;
+      exited = true;
+      onExit?.(error);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    }, 1500);
+    timer.unref();
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+      finishExit(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      const output = stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim().slice(-3000);
+      const failure = code === 0
+        ? undefined
+        : new Error(`${command}: exited with ${code ?? signal ?? 'an error'}${output ? `\n${output}` : ''}`);
+      if (!settled) {
+        settled = true;
+        if (failure) reject(failure);
+        else resolve();
+      }
+      finishExit(failure);
+    });
   });
 }
 
@@ -191,6 +268,7 @@ interface HookOptions {
   hookDir?: string;
   env?: NodeJS.ProcessEnv;
   run?: (command: string, args: string[], cwd?: string) => Promise<void>;
+  dispatch?: (command: string, args: string[], cwd?: string, onExit?: (error?: Error) => void) => Promise<void>;
 }
 export class HookManager {
   readonly dir: string;
@@ -200,6 +278,7 @@ export class HookManager {
   private readonly dshHome: string;
   private readonly profile: string;
   private readonly run: NonNullable<HookOptions['run']>;
+  private readonly dispatch: NonNullable<HookOptions['dispatch']>;
 
   constructor(options: HookOptions = {}) {
     const home = options.homeDir ?? homedir();
@@ -221,6 +300,7 @@ export class HookManager {
       workbuddy: join(this.env.WORKBUDDY_CONFIG_DIR || join(home, '.workbuddy'), 'settings.json'),
     };
     this.run = options.run ?? (async (command, args, cwd) => { await nativeCommand(command, args, await this.runtimeEnv(), 120_000, cwd); });
+    this.dispatch = options.dispatch ?? (async (command, args, cwd, onExit) => { await spawnNativeCommand(command, args, await this.runtimeEnv(), cwd, onExit); });
   }
 
   private async runtimeEnv() {
@@ -386,6 +466,23 @@ export class HookManager {
     }
   }
 
+  async dispatchReply(agent: Agent, sessionId: string, instruction: string, workspace?: string, onExit?: (error?: Error) => void) {
+    const spec = replyCommandSpec(agent, sessionId, instruction);
+    if (!spec) throw new Error(`${LABELS[agent]} does not support follow-up replies.`);
+    const cwd = workspace && await exists(workspace) ? workspace : undefined;
+    if (this.dispatch.length >= 4) {
+      await this.dispatch(spec.command, spec.args, cwd, onExit);
+      return;
+    }
+    try {
+      await this.dispatch(spec.command, spec.args, cwd);
+      onExit?.();
+    } catch (error) {
+      onExit?.(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
   private async notifyTest(agent: Agent, marker: string) {
     const invocation = runtimeInvocation(this.runner, agent, await this.runtimeHint());
     const env = { ...process.env, ...this.env };
@@ -404,14 +501,123 @@ export class HookManager {
   }
 }
 
+interface ReplyTarget {
+  id: string;
+  agent: Agent;
+  sessionId: string;
+  workspace: string;
+}
+
+const MAX_REPLY_TARGETS = 50;
+const REPLY_TOOL_SCHEMA = {
+  name: 'reply_coding_agent',
+  tags: ['act'] as const,
+  description: 'Send a user-confirmed choice or reply to an enabled Coding Agent session (up to 4 choices or yes/no confirmation only; never call automatically).',
+  parameters: {
+    type: 'object',
+    properties: {
+      targetId: { type: 'string', description: 'Reply target ID from the coding-agent.completed event (for example, "r1").' },
+      instruction: { type: 'string', description: 'The user-confirmed choice or concise instruction to send to the agent session.' },
+    },
+    required: ['targetId', 'instruction'],
+    additionalProperties: false,
+  },
+};
+
+function normalizeReplyAgents(value: unknown): Agent[] {
+  if (!Array.isArray(value)) return [];
+  const selected = new Set(value.filter((item): item is Agent => isAgent(item) && REPLY_MODES[item] !== 'unsupported'));
+  return AGENTS.filter((agent) => selected.has(agent));
+}
+
 export class CodingAgentNotifyWorld implements World {
   readonly id = ID;
   private host: WorldHost | null = null;
   private server: Server | null = null;
   private token = '';
+  private nextReplySeq = 0;
   private readonly testReports = new Map<Agent, { marker: string; received: () => void }>();
-  constructor(private readonly timezone: string, private readonly hooks = new HookManager()) {}
-  tools() { return []; }
+  private readonly replyTargets = new Map<string, ReplyTarget>();
+  private readonly inFlightSessions = new Set<string>();
+  private readonly defaultCfg: CodingAgentNotifySection = { enabled: true, replyEnabled: false, replyAgents: [] };
+  private readonly configStore: { get(): CodingAgentNotifySection; persist(patch: Partial<CodingAgentNotifySection>): void };
+
+  constructor(
+    private readonly timezone: string,
+    private readonly hooks = new HookManager(),
+    configStore?: { get(): CodingAgentNotifySection; persist(patch: Partial<CodingAgentNotifySection>): void },
+  ) {
+    this.configStore = configStore ?? {
+      get: () => this.defaultCfg,
+      persist: (patch) => Object.assign(this.defaultCfg, patch),
+    };
+  }
+
+  private replyState(): ReplyConfigState {
+    const cfg = this.configStore.get();
+    return { enabled: Boolean(cfg.replyEnabled), agents: normalizeReplyAgents(cfg.replyAgents) };
+  }
+
+  private isReplyEnabledFor(agent: Agent): boolean {
+    if (REPLY_MODES[agent] === 'unsupported') return false;
+    const state = this.replyState();
+    return state.enabled && state.agents.includes(agent);
+  }
+
+  private registerReplyTarget(agent: Agent, sessionId: string, workspace: string): string {
+    const id = `r${++this.nextReplySeq}`;
+    this.replyTargets.set(id, { id, agent, sessionId, workspace });
+    if (this.replyTargets.size > MAX_REPLY_TARGETS) {
+      const oldest = this.replyTargets.keys().next().value;
+      if (oldest) this.replyTargets.delete(oldest);
+    }
+    return id;
+  }
+
+  private replyTool(): ToolDef {
+    return {
+      ...REPLY_TOOL_SCHEMA,
+      handler: async (args) => {
+        const targetId = typeof args.targetId === 'string' ? args.targetId.trim() : '';
+        const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : '';
+        if (!targetId || !instruction) {
+          return { failed: true, text: 'targetId and instruction are required.' };
+        }
+        if (instruction.length > 4000) {
+          return { failed: true, text: 'instruction must be 4000 characters or fewer.' };
+        }
+        const target = this.replyTargets.get(targetId);
+        if (!target) {
+          return { failed: true, text: `Unknown or expired reply target: ${targetId}.` };
+        }
+        if (!this.isReplyEnabledFor(target.agent)) {
+          return { failed: true, text: `Follow-up replies are disabled for ${LABELS[target.agent]}.` };
+        }
+        const sessionKey = `${target.agent}:${target.sessionId}`;
+        if (this.inFlightSessions.has(sessionKey)) {
+          return { failed: true, text: `${LABELS[target.agent]} session ${target.sessionId} already has a follow-up instruction in flight.` };
+        }
+        this.inFlightSessions.add(sessionKey);
+        try {
+          await this.hooks.dispatchReply(target.agent, target.sessionId, instruction, target.workspace, (error) => {
+            this.inFlightSessions.delete(sessionKey);
+            if (error) this.host?.log.warn('Coding-agent follow-up command failed', { err: error.message });
+          });
+        } catch (error) {
+          this.inFlightSessions.delete(sessionKey);
+          const message = error instanceof Error ? error.message : String(error);
+          return { failed: true, text: `Failed to dispatch instruction to ${LABELS[target.agent]}: ${message}` };
+        }
+        return REPLY_MODES[target.agent] === 'background-resume'
+          ? `已向 ${LABELS[target.agent]} 会话（${target.sessionId}）后台发送指令，完成后会再次通知，可在命令行 /resume 查看。`
+          : `已向 ${LABELS[target.agent]} 会话（${target.sessionId}）发送指令，完成后会再次通知。`;
+      },
+    };
+  }
+
+  tools(): ToolDef[] {
+    return [this.replyTool()];
+  }
   envPromptVars() { return {}; }
 
   async start(host: WorldHost) {
@@ -437,6 +643,8 @@ export class CodingAgentNotifyWorld implements World {
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
     const endpoint = join(this.hooks.dir, 'endpoint.json');
     try { if ((await readJson(endpoint)).token === this.token) await rm(endpoint); } catch {}
+    this.replyTargets.clear();
+    this.inFlightSessions.clear();
     this.host = null;
   }
 
@@ -445,18 +653,40 @@ export class CodingAgentNotifyWorld implements World {
     return {
       label: t.title,
       lamps: [{ label: t.title, state: this.server ? 'online' : 'offline' }],
-      panels: [{ id: 'hooks', title: t.hooksTitle, getMethods: ['state'] }],
+      panels: [
+        { id: 'hooks', title: t.hooksTitle, getMethods: ['state'] },
+        { id: 'reply', title: t.replyTitle, getMethods: ['state'] },
+      ],
       invoke: async (panel, method, args) => {
-        if (panel !== 'hooks') throw new Error('Unknown panel');
+        if (panel !== 'hooks' && panel !== 'reply') throw new Error('Unknown panel');
         let testResult: TestResult | undefined;
-        if (method !== 'state') {
+        if (panel === 'reply') {
+          if (method === 'setReply') {
+            const payload = args[0];
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid reply settings');
+            const current = this.replyState();
+            const record = payload as { enabled?: unknown; agents?: unknown };
+            if (record.enabled !== undefined && typeof record.enabled !== 'boolean') throw new Error('Invalid reply enabled flag');
+            if (record.agents !== undefined && !Array.isArray(record.agents)) throw new Error('Invalid reply agents list');
+            const nextEnabled = record.enabled ?? current.enabled;
+            const nextAgents = record.agents !== undefined ? normalizeReplyAgents(record.agents) : current.agents;
+            this.configStore.persist({ replyEnabled: nextEnabled, replyAgents: nextAgents });
+          } else if (method !== 'state') {
+            throw new Error('Unknown method');
+          }
+        } else if (method !== 'state') {
           const agent = args[0];
           if (!isAgent(agent)) throw new Error('Unknown agent');
           if (method === 'install') await this.hooks.install(agent);
           else if (method === 'test') testResult = await this.testAgent(agent);
           else throw new Error('Unknown method');
         }
-        return { online: this.server !== null, agents: await this.hooks.statuses(), ...(testResult ? { testResult } : {}) };
+        return {
+          online: this.server !== null,
+          agents: await this.hooks.statuses(),
+          reply: this.replyState(),
+          ...(testResult ? { testResult } : {}),
+        };
       },
       promptDocs: [{
         key: `worlds.${ID}.envPrompt`, title: t.promptTitle, description: t.promptDescription, role: 'envPrompt',
@@ -513,6 +743,14 @@ export class CodingAgentNotifyWorld implements World {
       const matched = check && body.summary.includes(check.marker);
       const test = body.test === true || Boolean(matched);
       const coverage = body.test === true ? 'notification-only' : 'full';
+      const replyTargetId = !test && sessionId && this.isReplyEnabledFor(agent)
+        ? this.registerReplyTarget(agent, sessionId, workspace)
+        : undefined;
+      const replyGuide = replyTargetId
+        ? REPLY_MODES[agent] === 'background-resume'
+          ? `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。后台续跑，可在命令行 /resume 查看。`
+          : `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。`
+        : '当前未启用指令回传，不要提供可代为执行的操作选项。';
       await this.host!.pushEvent({
         type: 'coding-agent.completed', source: ID, senderKey: `${ID}.${body.agent}`,
         ts: nowIso(this.timezone),
@@ -521,11 +759,18 @@ export class CodingAgentNotifyWorld implements World {
             ? coverage === 'notification-only'
               ? `PATH 未检测到 ${agent} 命令，本次仅测试通知发送，请用 pet_say 告知用户已收到，并请用户手动测试 Agent 完成通知。`
               : `${LABELS[agent]} CLI 测试的原生 hook 回报已到达 Coopanion，请用 pet_say 简短通知用户已收到。`
-            : `${LABELS[agent]} 已完成一轮任务。请将它的最终结论总结成一两句话，并用 pet_say 通知用户。`,
+            : `${LABELS[agent]} 已完成一轮任务。请将它的最终结论总结成一两句话，并用 pet_say 通知用户。${replyGuide}`,
           ...(workspace ? [`项目：${JSON.stringify(workspace)}`] : []),
           ...(test ? [] : ['最终结论：', body.summary.slice(0, 20_000)]),
         ].join('\n'),
-        meta: { agent: body.agent, workspace, sessionId, test, ...(test ? { testCoverage: coverage } : {}) },
+        meta: {
+          agent: body.agent,
+          workspace,
+          sessionId,
+          test,
+          ...(test ? { testCoverage: coverage } : {}),
+          ...(replyTargetId ? { replyTargetId, replyMode: REPLY_MODES[agent] } : {}),
+        },
       }, { trigger: 'flush' });
       if (matched) check.received();
       reply(202, { accepted: true });
@@ -537,14 +782,27 @@ export class CodingAgentNotifyWorld implements World {
   }
 }
 
-const describe: WorldDescribe = { tools: [], events: [{
-  type: 'coding-agent.completed',
-  description: { zh: 'Coding Agent 完成一轮任务并发来最终结论，请简要总结并通知用户。', en: 'A coding agent completed a task turn and sent its final conclusion. Summarize it briefly and notify the user.' },
-  trigger: 'flush',
-}] };
-const definition: WorldDefinition<WorldSection> = {
+const describe: WorldDescribe = {
+  tools: [{
+    ...REPLY_TOOL_SCHEMA,
+    summary: {
+      zh: '在用户明确确认后，向已勾选的 Coding Agent CLI 会话发送后续指令（仅用于 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题）。',
+      en: 'Send a user-confirmed follow-up instruction to an enabled Coding Agent CLI session (simple multiple-choice up to 4 options or yes/no confirmation only).',
+    },
+  }],
+  events: [{
+    type: 'coding-agent.completed',
+    description: { zh: 'Coding Agent 完成一轮任务并发来最终结论，请简要总结并通知用户。', en: 'A coding agent completed a task turn and sent its final conclusion. Summarize it briefly and notify the user.' },
+    trigger: 'flush',
+  }],
+};
+const definition: WorldDefinition<CodingAgentNotifySection> = {
   id: ID, get label() { return uiText(systemLanguage()).title; },
-  defaults: () => ({ enabled: false }),
-  create: (ctx) => new CodingAgentNotifyWorld(ctx.timezone), describe,
+  defaults: () => ({ enabled: false, replyEnabled: false, replyAgents: [] }),
+  create: (ctx) => new CodingAgentNotifyWorld(ctx.timezone, undefined, {
+    get: () => ctx.cfg,
+    persist: (patch) => ctx.persist(patch),
+  }),
+  describe,
 };
 export default definition;

@@ -4,9 +4,20 @@ import type { WebUiClientBundle, WebUiPanel } from 'cortico/web/shared/client-pa
 export type Agent = 'codex' | 'claude' | 'opencode' | 'dsh' | 'muse' | 'agy' | 'workbuddy';
 export const AGENTS: Agent[] = ['codex', 'claude', 'opencode', 'dsh', 'muse', 'agy', 'workbuddy'];
 export const LABELS: Record<Agent, string> = { codex: 'Codex', claude: 'Claude Code', opencode: 'OpenCode', dsh: 'DeepSeek Harness', muse: 'Muse Code', agy: 'Antigravity (agy)', workbuddy: 'WorkBuddy' };
+export type ReplyMode = 'live-session' | 'background-resume' | 'unsupported';
+export const REPLY_MODES: Record<Agent, ReplyMode> = {
+  codex: 'live-session',
+  claude: 'background-resume',
+  opencode: 'live-session',
+  dsh: 'unsupported',
+  muse: 'unsupported',
+  agy: 'background-resume',
+  workbuddy: 'unsupported',
+};
+export interface ReplyConfigState { enabled: boolean; agents: Agent[] }
 export interface HookStatus { id: Agent; installed: boolean; detail: string }
 export interface TestResult { coverage: 'full' | 'notification-only' }
-export interface PanelState { online: boolean; agents: HookStatus[]; testResult?: TestResult }
+export interface PanelState { online: boolean; agents: HookStatus[]; reply: ReplyConfigState; testResult?: TestResult }
 
 // Text shared with the World declaration; importing this module does not mount the panel.
 const COPY: Record<Language, readonly [string, string, string, string, string, string, string, string]> = {
@@ -36,10 +47,26 @@ export function uiText(language: Language) {
       : 'CLI → native hook → Coopanion report received. Confirm the pet notification.',
     partial: (agent: Agent) => zh ? `PATH 未检测到 ${agent} 命令，本次仅测试通知发送，请手动测试 Agent 完成通知。`
       : `Command ${agent} was not found on PATH. Only notification delivery was tested; manually test agent completion notifications.`,
+    replyTitle: zh ? '指令回传' : 'Follow-up replies',
+    replyToggle: zh ? '启用简单选择 / 确认指令回传' : 'Enable simple choice / confirmation follow-up replies',
+    replyCliOnly: zh ? '仅支持终端 CLI 会话，不支持桌面客户端或 IDE 插件。' : 'Terminal CLI sessions only; desktop clients and IDE extensions are not supported.',
+    replyHint: zh
+      ? '仅当已勾选的 CLI Agent 提出了 4 个选项以内的简单选择题，或“是否同意/继续”这类简单判断题，且由你明确选择/确认后才会回传指令。Codex、OpenCode 会直接续接当前会话（无需 /resume）；Antigravity (agy) 为后台命令，需先退出当前 CLI 再用 /resume 回到对话；Claude Code 为后台命令，需先退出当前 CLI 再在终端运行 claude --resume（勿在未退出的旧窗口内直接输入 /resume）。'
+      : 'Dispatches a follow-up only when a checked CLI agent asks a simple multiple-choice question (up to 4 options) or a simple yes/no confirmation and you explicitly choose/confirm. Codex and OpenCode continue the live CLI session directly (no /resume needed). Antigravity (agy) runs via a background command—exit the current CLI first, then use /resume. Claude Code also runs via a background command—exit the current CLI first, then run `claude --resume` in the terminal (do not run /resume inside the still-open TUI).',
+    replyAgentModes: {
+      codex: zh ? 'CLI 直接入队续接，无需 /resume' : 'CLI live queue, no /resume needed',
+      opencode: zh ? 'CLI 直接续接当前会话，无需 /resume' : 'CLI live session, no /resume needed',
+      agy: zh ? '后台 CLI，需先退出当前 CLI 再 /resume' : 'background CLI, exit current CLI before /resume',
+      claude: zh ? '后台 CLI，需先退出当前 CLI 再运行 claude --resume，勿在旧窗口内直接 /resume' : 'background CLI, exit current CLI then run claude --resume; do not run /resume in the open TUI',
+      dsh: zh ? '暂不支持' : 'not supported yet',
+      muse: zh ? '暂不支持' : 'not supported yet',
+      workbuddy: zh ? '暂不支持' : 'not supported yet',
+    } as Record<Agent, string>,
+    replySaved: zh ? '指令回传设置已更新' : 'Follow-up reply settings updated',
   };
 }
 
-const panel: WebUiPanel = {
+const hooksPanel: WebUiPanel = {
   mount(ctx) {
     const { ui } = ctx;
     const t = uiText(ctx.language);
@@ -55,7 +82,7 @@ const panel: WebUiPanel = {
     ctx.root.append(sheet.el);
     const rows = new Map<Agent, { state: HTMLSpanElement; install: HTMLButtonElement; test: HTMLButtonElement; result: HTMLElement }>();
     const pending = new Set<Agent>();
-    let current: PanelState = { online: false, agents: [] };
+    let current: PanelState = { online: false, agents: [], reply: { enabled: false, agents: [] } };
 
     for (const agent of AGENTS) {
       const row = ui.h('div');
@@ -125,4 +152,73 @@ const panel: WebUiPanel = {
   },
 };
 
-export default { panels: { hooks: panel } } satisfies WebUiClientBundle;
+const replyPanel: WebUiPanel = {
+  mount(ctx) {
+    const { ui } = ctx;
+    const t = uiText(ctx.language);
+    const sheet = ui.sheet({ title: t.replyTitle });
+    let current: PanelState = { online: false, agents: [], reply: { enabled: false, agents: [] } };
+    let savingReply = false;
+    const replyBoxes = new Map<Agent, ReturnType<typeof ui.checkbox>>();
+    const cliOnly = ui.h('p', '', t.replyCliOnly);
+    const replyMaster = ui.checkbox(t.replyToggle, {
+      checked: false,
+      disabled: true,
+      onChange: (enabled) => void saveReply(enabled, selectedReplyAgents()),
+    });
+    const replyAgentsList = ui.h('div');
+    replyAgentsList.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding-top:4px';
+    for (const agent of AGENTS) {
+      const box = ui.checkbox(`${LABELS[agent]}（${t.replyAgentModes[agent]}）`, {
+        checked: false,
+        disabled: true,
+        onChange: () => void saveReply(replyMaster.checked, selectedReplyAgents()),
+      });
+      replyBoxes.set(agent, box);
+      replyAgentsList.append(box.el);
+    }
+    sheet.body.append(cliOnly, replyMaster.el, ui.h('p', '', t.replyHint), replyAgentsList);
+    ctx.root.append(sheet.el);
+
+    function selectedReplyAgents(): Agent[] {
+      return AGENTS.filter((agent) => REPLY_MODES[agent] !== 'unsupported' && replyBoxes.get(agent)?.checked);
+    }
+
+    function render(value: PanelState) {
+      if (ctx.signal.aborted) return;
+      current = value;
+      const reply = value.reply ?? { enabled: false, agents: [] };
+      replyMaster.setChecked(reply.enabled);
+      replyMaster.input.disabled = savingReply;
+      for (const agent of AGENTS) {
+        const box = replyBoxes.get(agent);
+        if (!box) continue;
+        const supported = REPLY_MODES[agent] !== 'unsupported';
+        box.setChecked(supported && reply.agents.includes(agent));
+        box.input.disabled = savingReply || !supported || !reply.enabled;
+      }
+    }
+
+    async function saveReply(enabled: boolean, agents: Agent[]) {
+      if (savingReply) return;
+      savingReply = true;
+      render(current);
+      try {
+        const value = await ctx.invoke<PanelState>('setReply', [{ enabled, agents }]);
+        render(value);
+        if (!ctx.signal.aborted) ui.toast(t.replySaved, 'ok');
+      } catch (error) {
+        if (!ctx.signal.aborted) ui.toast(error instanceof Error ? error.message : String(error), 'bad');
+      } finally {
+        savingReply = false;
+        render(current);
+      }
+    }
+
+    void ctx.invoke<PanelState>('state').then(render).catch((error) => {
+      if (!ctx.signal.aborted) ui.toast(String(error), 'bad');
+    });
+  },
+};
+
+export default { panels: { hooks: hooksPanel, reply: replyPanel } } satisfies WebUiClientBundle;

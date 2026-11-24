@@ -750,7 +750,7 @@ export class CodingAgentNotifyWorld implements World {
         ? REPLY_MODES[agent] === 'background-resume'
           ? `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。后台续跑，可在命令行 /resume 查看。`
           : `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。`
-        : '当前未启用指令回传，不要提供可代为执行的操作选项。';
+        : '当前未启用指令回传，只能调用 pet_say 通知，禁止调用 pet_ask 或提供任何选项。';
       await this.host!.pushEvent({
         type: 'coding-agent.completed', source: ID, senderKey: `${ID}.${body.agent}`,
         ts: nowIso(this.timezone),

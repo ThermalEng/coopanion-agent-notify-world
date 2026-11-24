@@ -613,7 +613,7 @@ describe('follow-up replies', () => {
     const [openCodeEvent, codexEvent, agyEvent, claudeEvent] = f.pushEvent.mock.calls.map((c) => c[0] as { text: string; meta: Record<string, unknown> });
 
     expect(openCodeEvent.meta.replyTargetId).toBeUndefined();
-    expect(openCodeEvent.text).toContain('不要提供可代为执行的操作选项');
+    expect(openCodeEvent.text).toContain('禁止调用 pet_ask');
 
     expect(codexEvent.meta.replyTargetId).toBe('r1');
     expect(codexEvent.meta.replyMode).toBe('live-session');

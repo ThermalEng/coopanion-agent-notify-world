@@ -527,6 +527,47 @@ const REPLY_TOOL_SCHEMA = {
   },
 };
 
+const DECISION_GREETING_RE = /(?:有什么我可以帮|有什么能帮|有什么需要|还有什么|需要其他帮助|anything else|how can i help|what can i help)/i;
+const OPTION_LINE_RE = /^(?:[-*•]\s*)?(?:\*{0,2})(?:(\d+)[.)、]|([A-Ea-e])[.)、]|(?:选项|方案)\s*[1-9A-Ea-e])(?:\*{0,2})\s*\S/;
+const CHOICE_PROMPT_RE = /(?:请选择|选哪|哪一个|哪一项|哪种|选哪个|选定|回复哪个|please choose|please select|which (?:one|option|approach)|pick one|which do you prefer)/i;
+const INLINE_CHOICE_RE = /(?:还是|二选一|三选一|四选一|选哪|哪一个|哪一项|哪种|which (?:one|option|approach))/i;
+const YES_NO_ZH_RE = /(?:是否|要不要|要现在|需要我|需要现在|可以吗|行吗|好吗|同意吗|确认.+吗|继续吗|执行吗|开始吗|提交吗|推送吗|合并吗|修改吗|修复吗|删除吗|覆盖吗|跳过吗|帮[你我].+吗)/;
+const YES_NO_EN_RE = /(?:^|[.!;]\s*)(?:should i|shall i|do you want me to|would you like me to|want me to|can i|may i|proceed|continue|confirm|approve|go ahead)\b/i;
+const QUESTION_END_RE = /[?？][」』"'”’）)\s]*$/;
+
+export function detectDecisionPrompt(summary: string): boolean {
+  const cleaned = summary
+    .replace(/```[\s\S]*?```/g, '\n')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\]\([^)]+\)/g, ']')
+    .replace(/https?:\/\/\S+/g, ' ');
+  const lines = cleaned.slice(-1200).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+
+  const optionLines: string[] = [];
+  const promptLines: string[] = [];
+  for (const line of lines) {
+    if (OPTION_LINE_RE.test(line)) optionLines.push(line);
+    else promptLines.push(line);
+  }
+  if (optionLines.length >= 2 && optionLines.length <= 4) {
+    for (const line of promptLines) {
+      if (DECISION_GREETING_RE.test(line)) continue;
+      if (QUESTION_END_RE.test(line) || CHOICE_PROMPT_RE.test(line)) return true;
+    }
+  }
+
+  for (const line of lines.slice(-3)) {
+    if (DECISION_GREETING_RE.test(line)) continue;
+    if (/\((?:y\/n|yes\/no)\)|\[(?:y\/n|yes\/no)\]/i.test(line)) return true;
+    if (!QUESTION_END_RE.test(line)) continue;
+    if (INLINE_CHOICE_RE.test(line)) return true;
+    if (/\bor\b/i.test(line) && /(?:want|prefer|should|would you like|choose|pick|use|do|which)/i.test(line)) return true;
+    if (YES_NO_ZH_RE.test(line) || YES_NO_EN_RE.test(line)) return true;
+  }
+  return false;
+}
+
 export function isRealUserReplyEvent(event: EventEnvelope): boolean {
   if (event.source === 'desktop-pet') {
     if (event.type === 'desktop-pet.answer') {
@@ -638,7 +679,7 @@ export class CodingAgentNotifyWorld implements World {
           if (isRealUserReplyEvent(candidates[i])) { authEvent = candidates[i]; break; }
         }
         if (!authEvent) {
-          return { failed: true, text: '拒绝发送：尚未收到用户的真实选择或回复，本次未向 Agent 发送任何指令。请勿向用户声称已发送，也不要自动重试。' };
+          return { failed: true, text: '拒绝发送：尚未收到用户的真实选择或回复，本次未向 Agent 发送任何指令。禁止自行编造确认弹窗或调用 pet_ask，请勿向用户声称已发送，直接结束本轮。' };
         }
         // Single-use authorization: consume both target and user event cursor before dispatching.
         this.replyTargets.delete(targetId);
@@ -792,14 +833,17 @@ export class CodingAgentNotifyWorld implements World {
       const test = body.test === true || Boolean(matched);
       const coverage = body.test === true ? 'notification-only' : 'full';
       const initialCursor = this.host?.store?.latestCursor?.() ?? 0;
-      const replyTargetId = !test && sessionId && this.isReplyEnabledFor(agent)
+      const replyEnabled = !test && Boolean(sessionId) && this.isReplyEnabledFor(agent);
+      const replyTargetId = replyEnabled && detectDecisionPrompt(body.summary)
         ? this.registerReplyTarget(agent, sessionId, workspace, initialCursor)
         : undefined;
       const replyGuide = replyTargetId
         ? REPLY_MODES[agent] === 'background-resume'
           ? `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。后台续跑，可在命令行 /resume 查看。`
           : `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。`
-        : '当前未启用指令回传，只能调用 pet_say 通知，禁止调用 pet_ask 或提供任何选项。';
+        : replyEnabled
+          ? '本次结论未要求用户决策，只能调用 pet_say 总结通知，禁止自行生成决策建议、禁止调用 pet_ask，也禁止调用 reply_coding_agent。'
+          : '当前未启用指令回传，只能调用 pet_say 通知，禁止调用 pet_ask 或提供任何选项。';
       const saved = await this.host!.pushEvent({
         type: 'coding-agent.completed', source: ID, senderKey: `${ID}.${body.agent}`,
         ts: nowIso(this.timezone),

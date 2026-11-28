@@ -2,6 +2,10 @@
 
 # Changelog
 
+## 1.3.3 — 2026-11-28
+
+- 增加 `detectDecisionPrompt` 结论决策识别门控：仅当已勾选 Agent 的最终结论确实向用户提出了 4 个选项以内的选择题或“是否同意/继续”等判断题时，才分配 `targetId` 并允许选项交互；对于纯审查报告（如 `REQUEST_CHANGES` / `APPROVE`）、进度汇报或礼貌问候，不分配 `targetId` 并明确禁止 Coopanion 自行生成决策建议、调用 `pet_ask` 或调用 `reply_coding_agent`。
+
 ## 1.3.2 — 2026-11-28
 
 - 加固指令回传代码级门控（保持单步交互，无需二次弹窗确认）：`reply_coding_agent` 强制校验事件库中在对应通知之后、最近一次已授权游标之后是否存在真实用户输入事件（`desktop-pet.answer` 有效选择或回答、`desktop-pet.message`、`desktop-pet.speech`、`console.message`），过滤 `dismissed`、戳桌宠、自言自语与内部系统事件，彻底阻断未经用户交互的自动回复与循环。

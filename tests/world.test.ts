@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EventEnvelope, EventStoreReader, WorldHost } from 'cortico/core/types.ts';
 import { collectWorldContexts, renderWorldEnvPrompt } from 'cortico/core/prefix.ts';
 import { checkDescribe } from 'cortico/extensions/describe-export.ts';
-import definition, { CodingAgentNotifyWorld, enableCodexHooksToml, HookManager, powershellArgs, replyCommandSpec, type CodingAgentNotifySection } from '../index.ts';
+import definition, { CodingAgentNotifyWorld, detectDecisionPrompt, enableCodexHooksToml, HookManager, powershellArgs, replyCommandSpec, type CodingAgentNotifySection } from '../index.ts';
 import { AGENTS, type Agent, type PanelState } from '../webui.ts';
 
 const cleanups: Array<() => Promise<unknown> | void> = [];
@@ -611,7 +611,7 @@ describe('follow-up replies', () => {
     expect(f.cfg).toEqual({ enabled: true, replyEnabled: true, replyAgents: ['opencode', 'agy'] });
     expect(f.world.tools().map((t) => t.name)).toEqual(['reply_coding_agent']);
 
-    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a-disabled', workspace: f.root, summary: '1 or 2' });
+    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a-disabled', workspace: f.root, summary: 'Choose 1 or 2:\n1. One\n2. Two' });
     const targetId = (f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
     await f.invoke('setReply', { enabled: false });
     expect(f.world.tools().map((t) => t.name)).toEqual(['reply_coding_agent']);
@@ -626,7 +626,7 @@ describe('follow-up replies', () => {
 
     await postReport(f.hooks.dir, { agent: 'opencode', sessionId: 'o1', workspace: f.root, summary: '选 A 还是 B？' });
     await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c1', workspace: f.root, summary: '是否继续？' });
-    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a1', workspace: f.root, summary: '请四选一：1、2、3、4' });
+    await postReport(f.hooks.dir, { agent: 'agy', sessionId: 'a1', workspace: f.root, summary: '请选择：\n1. 一\n2. 二\n3. 三\n4. 四' });
     await postReport(f.hooks.dir, { agent: 'claude', sessionId: 'cl1', workspace: f.root, summary: '是否同意执行？' });
 
     expect(f.pushEvent).toHaveBeenCalledTimes(4);
@@ -653,7 +653,7 @@ describe('follow-up replies', () => {
   it.each(['codex', 'claude', 'opencode', 'agy'] as const)('dispatches follow-up command for %s and validates guardrails', async (agent) => {
     const f = await mountedReply();
     await f.invoke('setReply', { enabled: true, agents: [agent] });
-    await postReport(f.hooks.dir, { agent, sessionId: `sess-${agent}`, workspace: f.root, summary: '1. 方案 A  2. 方案 B' });
+    await postReport(f.hooks.dir, { agent, sessionId: `sess-${agent}`, workspace: f.root, summary: '请选择：\n1. 方案 A\n2. 方案 B' });
 
     const event = f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } };
     const targetId = event.meta.replyTargetId;
@@ -692,7 +692,7 @@ describe('follow-up replies', () => {
 
     // Earlier user answer before the notification must not authorize a future notification.
     f.recordEvent({ type: 'desktop-pet.answer', source: 'desktop-pet', ts: '2026-11-28T10:00:00+08:00', text: '[answer] old', meta: { askId: 'old', index: 0 } });
-    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-loop', workspace: f.root, summary: '你好！有什么我可以帮你的？' });
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-loop', workspace: f.root, summary: '是否继续？' });
     const r1 = (f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
 
     // Non-user events (notice, self-activity, pet touch) must not authorize sending.
@@ -741,13 +741,50 @@ describe('follow-up replies', () => {
     expect(f.dispatch).toHaveBeenCalledTimes(3);
 
     // A newer completion for the same session supersedes the older targetId.
-    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 1 轮' });
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 1 轮，是否继续？' });
     const staleId = (f.pushEvent.mock.calls.at(-1)![0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
-    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 2 轮' });
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 2 轮，选 1 还是 2？' });
     const freshId = (f.pushEvent.mock.calls.at(-1)![0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
     f.recordEvent({ type: 'desktop-pet.message', source: 'desktop-pet', ts: '2026-11-28T10:08:00+08:00', text: '选 2' });
     expect(await tool.handler({ targetId: staleId, instruction: '选 2' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
     expect(typeof await tool.handler({ targetId: freshId, instruction: '选 2' }, { role: 'bot', log: console as never })).toBe('string');
     expect(f.dispatch).toHaveBeenCalledTimes(4);
+  });
+
+  it('detects genuine decision prompts and omits targetId for review/status/greeting reports', async () => {
+    expect(detectDecisionPrompt('**Verdict: REQUEST_CHANGES**\n\nRemaining findings: **3 Major, 1 Minor**\n\n1. **Major — Device form emits an invalid interface type.**\n2. **Major — Missing validation.**\n3. **Major — Unhandled null.**')).toBe(false);
+    expect(detectDecisionPrompt('**Verdict: APPROVE**\n\nAll tests passed. No files changed.')).toBe(false);
+    expect(detectDecisionPrompt('已推送到 GitHub testing 分支。')).toBe(false);
+    expect(detectDecisionPrompt('你好！有什么我可以帮你做的？')).toBe(false);
+    expect(detectDecisionPrompt('请选择：\n1. A\n2. B\n3. C\n4. D\n5. E')).toBe(false);
+
+    expect(detectDecisionPrompt('请问下一步想做什么？\n1. 苹果\n2. 橙子')).toBe(true);
+    expect(detectDecisionPrompt('Which approach do you prefer?\nA. Plan A\nB. Plan B')).toBe(true);
+    expect(detectDecisionPrompt('选方案 1 还是方案 2？')).toBe(true);
+    expect(detectDecisionPrompt('Should I use Redis or SQLite?')).toBe(true);
+    expect(detectDecisionPrompt('要不要现在开始修复？')).toBe(true);
+    expect(detectDecisionPrompt('Should I proceed?')).toBe(true);
+    expect(detectDecisionPrompt('Proceed with push? (y/n)')).toBe(true);
+
+    const f = await mountedReply();
+    await f.invoke('setReply', { enabled: true, agents: ['codex'] });
+    await postReport(f.hooks.dir, {
+      agent: 'codex',
+      sessionId: 'c-review',
+      workspace: f.root,
+      summary: '**Verdict: REQUEST_CHANGES**\n\n1. **Major — Issue 1.**\n2. **Major — Issue 2.**\n3. **Major — Issue 3.**',
+    });
+    await postReport(f.hooks.dir, {
+      agent: 'codex',
+      sessionId: 'c-hello',
+      workspace: f.root,
+      summary: '你好！有什么我可以帮你做的？',
+    });
+    const [reviewEvent, helloEvent] = f.pushEvent.mock.calls.map((c) => c[0] as { text: string; meta: Record<string, unknown> });
+    expect(reviewEvent.meta.replyTargetId).toBeUndefined();
+    expect(reviewEvent.text).toContain('禁止自行生成决策建议');
+    expect(reviewEvent.text).toContain('禁止调用 pet_ask');
+    expect(helloEvent.meta.replyTargetId).toBeUndefined();
+    expect(helloEvent.text).toContain('禁止自行生成决策建议');
   });
 });

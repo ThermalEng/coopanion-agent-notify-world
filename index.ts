@@ -8,7 +8,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { systemLanguage, type Language } from 'cortico/core/language.ts';
-import type { ToolDef, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
+import type { EventEnvelope, ToolDef, World, WorldHost, WorldWebUiDecl } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
 import type { WorldDefinition, WorldDescribe, WorldSection } from 'cortico/world.ts';
 import { AGENTS, LABELS, REPLY_MODES, uiText, type Agent, type HookStatus, type ReplyConfigState, type TestResult } from './webui.ts';
@@ -506,9 +506,12 @@ interface ReplyTarget {
   agent: Agent;
   sessionId: string;
   workspace: string;
+  afterCursor: number;
+  expiresAtMs: number;
 }
 
 const MAX_REPLY_TARGETS = 50;
+const REPLY_TARGET_TTL_MS = 30 * 60_000;
 const REPLY_TOOL_SCHEMA = {
   name: 'reply_coding_agent',
   tags: ['act'] as const,
@@ -524,6 +527,18 @@ const REPLY_TOOL_SCHEMA = {
   },
 };
 
+export function isRealUserReplyEvent(event: EventEnvelope): boolean {
+  if (event.source === 'desktop-pet') {
+    if (event.type === 'desktop-pet.answer') {
+      const meta = event.meta;
+      if (!meta || meta.dismissed === true) return false;
+      return typeof meta.index === 'number' || (typeof meta.text === 'string' && meta.text.trim().length > 0);
+    }
+    return event.type === 'desktop-pet.message' || event.type === 'desktop-pet.speech';
+  }
+  return event.source === 'console' && event.type === 'console.message';
+}
+
 function normalizeReplyAgents(value: unknown): Agent[] {
   if (!Array.isArray(value)) return [];
   const selected = new Set(value.filter((item): item is Agent => isAgent(item) && REPLY_MODES[item] !== 'unsupported'));
@@ -536,6 +551,7 @@ export class CodingAgentNotifyWorld implements World {
   private server: Server | null = null;
   private token = '';
   private nextReplySeq = 0;
+  private lastAuthorizedUserCursor = 0;
   private readonly testReports = new Map<Agent, { marker: string; received: () => void }>();
   private readonly replyTargets = new Map<string, ReplyTarget>();
   private readonly inFlightSessions = new Set<string>();
@@ -564,9 +580,15 @@ export class CodingAgentNotifyWorld implements World {
     return state.enabled && state.agents.includes(agent);
   }
 
-  private registerReplyTarget(agent: Agent, sessionId: string, workspace: string): string {
+  private registerReplyTarget(agent: Agent, sessionId: string, workspace: string, afterCursor: number): string {
+    for (const [existingId, existing] of this.replyTargets) {
+      if (existing.agent === agent && existing.sessionId === sessionId) this.replyTargets.delete(existingId);
+    }
     const id = `r${++this.nextReplySeq}`;
-    this.replyTargets.set(id, { id, agent, sessionId, workspace });
+    this.replyTargets.set(id, {
+      id, agent, sessionId, workspace, afterCursor,
+      expiresAtMs: Date.now() + REPLY_TARGET_TTL_MS,
+    });
     if (this.replyTargets.size > MAX_REPLY_TARGETS) {
       const oldest = this.replyTargets.keys().next().value;
       if (oldest) this.replyTargets.delete(oldest);
@@ -577,7 +599,8 @@ export class CodingAgentNotifyWorld implements World {
   private replyTool(): ToolDef {
     return {
       ...REPLY_TOOL_SCHEMA,
-      handler: async (args) => {
+      barrierAfter: true,
+      handler: async (args, ctx) => {
         const targetId = typeof args.targetId === 'string' ? args.targetId.trim() : '';
         const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : '';
         if (!targetId || !instruction) {
@@ -597,6 +620,29 @@ export class CodingAgentNotifyWorld implements World {
         if (this.inFlightSessions.has(sessionKey)) {
           return { failed: true, text: `${LABELS[target.agent]} session ${target.sessionId} already has a follow-up instruction in flight.` };
         }
+        if (ctx.signal?.aborted) {
+          return { failed: true, text: '操作已取消，未向 Agent 发送任何指令。' };
+        }
+        if (Date.now() >= target.expiresAtMs) {
+          this.replyTargets.delete(targetId);
+          return { failed: true, text: '该通知的回传目标已过期，未发送任何指令。请勿向用户声称已发送。' };
+        }
+        const store = this.host?.store;
+        if (!store) {
+          return { failed: true, text: '无法校验用户确认记录，本次未发送任何指令。请勿向用户声称已发送。' };
+        }
+        const minCursor = Math.max(target.afterCursor, this.lastAuthorizedUserCursor) + 1;
+        const candidates = store.range({ fromCursor: minCursor });
+        let authEvent: EventEnvelope | undefined;
+        for (let i = candidates.length - 1; i >= 0; i--) {
+          if (isRealUserReplyEvent(candidates[i])) { authEvent = candidates[i]; break; }
+        }
+        if (!authEvent) {
+          return { failed: true, text: '拒绝发送：尚未收到用户的真实选择或回复，本次未向 Agent 发送任何指令。请勿向用户声称已发送，也不要自动重试。' };
+        }
+        // Single-use authorization: consume both target and user event cursor before dispatching.
+        this.replyTargets.delete(targetId);
+        this.lastAuthorizedUserCursor = authEvent.cursor;
         this.inFlightSessions.add(sessionKey);
         try {
           await this.hooks.dispatchReply(target.agent, target.sessionId, instruction, target.workspace, (error) => {
@@ -645,6 +691,7 @@ export class CodingAgentNotifyWorld implements World {
     try { if ((await readJson(endpoint)).token === this.token) await rm(endpoint); } catch {}
     this.replyTargets.clear();
     this.inFlightSessions.clear();
+    this.lastAuthorizedUserCursor = 0;
     this.host = null;
   }
 
@@ -671,6 +718,7 @@ export class CodingAgentNotifyWorld implements World {
             const nextEnabled = record.enabled ?? current.enabled;
             const nextAgents = record.agents !== undefined ? normalizeReplyAgents(record.agents) : current.agents;
             this.configStore.persist({ replyEnabled: nextEnabled, replyAgents: nextAgents });
+            this.replyTargets.clear();
           } else if (method !== 'state') {
             throw new Error('Unknown method');
           }
@@ -743,15 +791,16 @@ export class CodingAgentNotifyWorld implements World {
       const matched = check && body.summary.includes(check.marker);
       const test = body.test === true || Boolean(matched);
       const coverage = body.test === true ? 'notification-only' : 'full';
+      const initialCursor = this.host?.store?.latestCursor?.() ?? 0;
       const replyTargetId = !test && sessionId && this.isReplyEnabledFor(agent)
-        ? this.registerReplyTarget(agent, sessionId, workspace)
+        ? this.registerReplyTarget(agent, sessionId, workspace, initialCursor)
         : undefined;
       const replyGuide = replyTargetId
         ? REPLY_MODES[agent] === 'background-resume'
           ? `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。后台续跑，可在命令行 /resume 查看。`
           : `仅当结论提出 4 个选项以内的简单选择题或“是否同意/继续”这类简单判断题时，才通过 pet_ask 或 pet_say 询问用户；确认后调用 reply_coding_agent（targetId: ${replyTargetId}），禁止自动回复。`
         : '当前未启用指令回传，只能调用 pet_say 通知，禁止调用 pet_ask 或提供任何选项。';
-      await this.host!.pushEvent({
+      const saved = await this.host!.pushEvent({
         type: 'coding-agent.completed', source: ID, senderKey: `${ID}.${body.agent}`,
         ts: nowIso(this.timezone),
         text: [
@@ -772,6 +821,14 @@ export class CodingAgentNotifyWorld implements World {
           ...(replyTargetId ? { replyTargetId, replyMode: REPLY_MODES[agent] } : {}),
         },
       }, { trigger: 'flush' });
+      if (replyTargetId) {
+        const target = this.replyTargets.get(replyTargetId);
+        if (target) {
+          target.afterCursor = typeof saved?.cursor === 'number'
+            ? saved.cursor
+            : (this.host?.store?.latestCursor?.() ?? initialCursor);
+        }
+      }
       if (matched) check.received();
       reply(202, { accepted: true });
     } catch (error) {

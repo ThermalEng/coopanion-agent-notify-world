@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { WorldHost } from 'cortico/core/types.ts';
+import type { EventEnvelope, EventStoreReader, WorldHost } from 'cortico/core/types.ts';
 import { collectWorldContexts, renderWorldEnvPrompt } from 'cortico/core/prefix.ts';
 import { checkDescribe } from 'cortico/extensions/describe-export.ts';
 import definition, { CodingAgentNotifyWorld, enableCodexHooksToml, HookManager, powershellArgs, replyCommandSpec, type CodingAgentNotifySection } from '../index.ts';
@@ -559,8 +559,28 @@ describe('follow-up replies', () => {
       get: () => cfg,
       persist: (patch) => Object.assign(cfg, patch),
     });
-    const pushEvent = vi.fn(async (event: unknown) => event);
-    const host = { pushEvent, log: { warn: vi.fn() } } as unknown as WorldHost;
+    const events: EventEnvelope[] = [];
+    const store: EventStoreReader = {
+      get: (cursor) => events.find((e) => e.cursor === cursor),
+      latestCursor: () => events.at(-1)?.cursor ?? 0,
+      range: (q) => events.filter((e) => {
+        if (q.fromCursor !== undefined && e.cursor < q.fromCursor) return false;
+        if (q.toCursor !== undefined && e.cursor > q.toCursor) return false;
+        if (q.source !== undefined && e.source !== q.source) return false;
+        if (q.senderKey !== undefined && e.senderKey !== q.senderKey) return false;
+        if (q.origin !== undefined && e.origin !== q.origin) return false;
+        return true;
+      }),
+      around: () => [],
+      grep: () => [],
+    };
+    const recordEvent = (event: Omit<EventEnvelope, 'cursor' | 'origin'> & { origin?: EventEnvelope['origin'] }) => {
+      const saved: EventEnvelope = { ...event, origin: event.origin ?? 'external', cursor: events.length + 1 };
+      events.push(saved);
+      return saved;
+    };
+    const pushEvent = vi.fn(async (event: unknown) => recordEvent(event as Omit<EventEnvelope, 'cursor' | 'origin'> & { origin?: EventEnvelope['origin'] }));
+    const host = { pushEvent, store, log: { warn: vi.fn() } } as unknown as WorldHost;
     cleanups.push(() => world.stop());
     await world.start(host);
     const ui = world.webUi('zh');
@@ -569,7 +589,7 @@ describe('follow-up replies', () => {
       { id: 'reply', title: '指令回传', getMethods: ['state'] },
     ]);
     const invoke = async (method: string, ...args: unknown[]) => await ui.invoke!('reply', method, args) as PanelState;
-    return { ...f, hooks, cfg, world, pushEvent, dispatch, invoke };
+    return { ...f, hooks, cfg, world, pushEvent, recordEvent, store, dispatch, invoke };
   }
 
   async function postReport(hookDir: string, payload: object) {
@@ -645,6 +665,7 @@ describe('follow-up replies', () => {
     const blank = await tool.handler({ targetId, instruction: '   ' }, { role: 'bot', log: console as never });
     expect(blank).toMatchObject({ failed: true });
 
+    f.recordEvent({ type: 'desktop-pet.answer', source: 'desktop-pet', ts: '2026-11-28T10:00:00+08:00', text: '[answer] 选了第 1 项', meta: { askId: 'a1', index: 0 } });
     const ok = await tool.handler({ targetId, instruction: '选方案 1' }, { role: 'bot', log: console as never });
     const spec = replyCommandSpec(agent, `sess-${agent}`, '选方案 1')!;
     expect(f.dispatch).toHaveBeenCalledWith(spec.command, spec.args, f.root);
@@ -661,5 +682,72 @@ describe('follow-up replies', () => {
     await f.invoke('setReply', { enabled: false });
     const disabled = await tool.handler({ targetId, instruction: '选方案 2' }, { role: 'bot', log: console as never });
     expect(disabled).toMatchObject({ failed: true });
+  });
+
+  it('blocks auto-replies without real user input, rejects dismissed answers, and enforces single-use authorization', async () => {
+    const f = await mountedReply();
+    await f.invoke('setReply', { enabled: true, agents: ['codex', 'opencode'] });
+    const tool = f.world.tools()[0];
+    expect(tool.barrierAfter).toBe(true);
+
+    // Earlier user answer before the notification must not authorize a future notification.
+    f.recordEvent({ type: 'desktop-pet.answer', source: 'desktop-pet', ts: '2026-11-28T10:00:00+08:00', text: '[answer] old', meta: { askId: 'old', index: 0 } });
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-loop', workspace: f.root, summary: '你好！有什么我可以帮你的？' });
+    const r1 = (f.pushEvent.mock.calls[0][0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+
+    // Non-user events (notice, self-activity, pet touch) must not authorize sending.
+    f.recordEvent({ type: 'notice', source: 'persona', origin: 'internal', ts: '2026-11-28T10:01:00+08:00', text: '[system] 1 new event' });
+    f.recordEvent({ type: 'desktop-pet.self', source: 'desktop-pet', ts: '2026-11-28T10:01:01+08:00', text: '做了:pet_say', meta: { kind: 'activity' } });
+    f.recordEvent({ type: 'desktop-pet.touch', source: 'desktop-pet', ts: '2026-11-28T10:01:02+08:00', text: '主人戳了你一下' });
+    expect(await tool.handler({ targetId: r1, instruction: '收到' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
+    expect(f.dispatch).not.toHaveBeenCalled();
+
+    // Dismissing pet_ask must not authorize sending.
+    f.recordEvent({ type: 'desktop-pet.answer', source: 'desktop-pet', ts: '2026-11-28T10:01:03+08:00', text: '关掉了提问', meta: { askId: 'a1', dismissed: true } });
+    expect(await tool.handler({ targetId: r1, instruction: '选 1' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
+    expect(f.dispatch).not.toHaveBeenCalled();
+
+    // Another pending notification exists; one real answer must only authorize one send (single-use cursor & target).
+    await postReport(f.hooks.dir, { agent: 'opencode', sessionId: 'o-other', workspace: f.root, summary: '选 A 还是 B？' });
+    const r2 = (f.pushEvent.mock.calls[1][0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+
+    f.recordEvent({ type: 'desktop-pet.answer', source: 'desktop-pet', ts: '2026-11-28T10:02:00+08:00', text: '[answer] 选了第 2 项', meta: { askId: 'a2', index: 1 } });
+    const sent = await tool.handler({ targetId: r2, instruction: 'B' }, { role: 'bot', log: console as never });
+    expect(typeof sent).toBe('string');
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+
+    // Reusing r2 or piggybacking r1 on the same consumed click fails.
+    expect(await tool.handler({ targetId: r2, instruction: 'B' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
+    expect(await tool.handler({ targetId: r1, instruction: 'A' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts typed/spoken/console user replies in one step and replaces stale targets on new turns', async () => {
+    const f = await mountedReply();
+    await f.invoke('setReply', { enabled: true, agents: ['codex'] });
+    const tool = f.world.tools()[0];
+
+    for (const userEvent of [
+      { type: 'desktop-pet.message', source: 'desktop-pet', ts: '2026-11-28T10:05:00+08:00', text: '继续执行', meta: { via: 'typed' } },
+      { type: 'desktop-pet.speech', source: 'desktop-pet', ts: '2026-11-28T10:06:00+08:00', text: '同意继续' },
+      { type: 'console.message', source: 'console', ts: '2026-11-28T10:07:00+08:00', text: '选 1' },
+    ]) {
+      await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '是否继续？' });
+      const targetId = (f.pushEvent.mock.calls.at(-1)![0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+      f.recordEvent(userEvent);
+      const res = await tool.handler({ targetId, instruction: userEvent.text }, { role: 'bot', log: console as never });
+      expect(typeof res).toBe('string');
+    }
+    expect(f.dispatch).toHaveBeenCalledTimes(3);
+
+    // A newer completion for the same session supersedes the older targetId.
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 1 轮' });
+    const staleId = (f.pushEvent.mock.calls.at(-1)![0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+    await postReport(f.hooks.dir, { agent: 'codex', sessionId: 'c-same', workspace: f.root, summary: '第 2 轮' });
+    const freshId = (f.pushEvent.mock.calls.at(-1)![0] as { meta: { replyTargetId: string } }).meta.replyTargetId;
+    f.recordEvent({ type: 'desktop-pet.message', source: 'desktop-pet', ts: '2026-11-28T10:08:00+08:00', text: '选 2' });
+    expect(await tool.handler({ targetId: staleId, instruction: '选 2' }, { role: 'bot', log: console as never })).toMatchObject({ failed: true });
+    expect(typeof await tool.handler({ targetId: freshId, instruction: '选 2' }, { role: 'bot', log: console as never })).toBe('string');
+    expect(f.dispatch).toHaveBeenCalledTimes(4);
   });
 });
